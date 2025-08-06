@@ -38,7 +38,9 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[str] = Field(default="default", description="Model name (ignored, uses loaded model)")
     messages: List[ChatMessage]
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0)
-    top_p: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
+    top_p: Optional[float] = Field(default=0.8, ge=0.0, le=1.0)  # Updated default for non-thinking mode
+    top_k: Optional[int] = Field(default=20, ge=0, description="Top-k sampling parameter")  # Updated default
+    min_p: Optional[float] = Field(default=0.0, ge=0.0, le=1.0, description="Min-p sampling parameter")
     n: Optional[int] = Field(default=1, ge=1)
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None

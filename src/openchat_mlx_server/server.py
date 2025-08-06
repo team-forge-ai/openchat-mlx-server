@@ -237,6 +237,8 @@ class MLXServer:
                     max_tokens=request.max_tokens or self.config.default_max_tokens,
                     temperature=request.temperature,
                     top_p=request.top_p,
+                    top_k=request.top_k,
+                    min_p=request.min_p,
                     repetition_penalty=1.0,  # Map from frequency_penalty if needed
                     stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
                     stream=False,
@@ -332,6 +334,8 @@ class MLXServer:
                 max_tokens=request.max_tokens or self.config.default_max_tokens,
                 temperature=request.temperature,
                 top_p=request.top_p,
+                top_k=request.top_k,
+                min_p=request.min_p,
                 repetition_penalty=1.0,
                 stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
                 stream=True,

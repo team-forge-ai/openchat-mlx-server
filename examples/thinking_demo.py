@@ -107,8 +107,8 @@ def test_thinking_api(base_url: str = "http://localhost:8000"):
             json={
                 "messages": test["messages"],
                 "include_reasoning": True,  # Include reasoning in response
-                "max_tokens": 300,
-                "temperature": 0.7
+                "max_tokens": 300
+                # Not specifying temperature/top_p/top_k - let the system apply Qwen3 recommendations
             }
         )
         
@@ -146,6 +146,9 @@ def test_thinking_api(base_url: str = "http://localhost:8000"):
     print("• Use /no_think to force thinking OFF")
     print("• Complex queries automatically trigger deeper reasoning")
     print("• Simple queries stay fast and direct")
+    print("• Automatic Qwen3 parameter optimization:")
+    print("  - Thinking mode: Temperature=0.6, TopP=0.95, TopK=20, MinP=0")
+    print("  - Non-thinking mode: Temperature=0.7, TopP=0.8, TopK=20, MinP=0")
 
 
 def test_streaming_with_thinking(base_url: str = "http://localhost:8000"):
