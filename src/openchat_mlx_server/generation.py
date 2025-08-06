@@ -9,6 +9,9 @@ import time
 
 import mlx.core as mx
 from mlx_lm import generate as mlx_generate
+from mlx_lm.generate import stream_generate, generate_step
+from mlx_lm.sample_utils import make_sampler, make_logits_processors
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from .api_models import ChatMessage, ReasoningItem
 from .utils import generate_id
@@ -52,6 +55,10 @@ class GenerationEngine:
         seed: Optional[int] = None,
         enable_thinking: Optional[bool] = None,
         include_reasoning: bool = True,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        min_tokens_to_keep: int = 1,
+        repetition_context_size: int = 20,
         **kwargs
     ) -> Union[str, Iterator[str], Tuple[str, Optional[ReasoningItem]]]:
         """
@@ -62,14 +69,18 @@ class GenerationEngine:
             tokenizer: Tokenizer object
             messages: Input messages or prompt string
             max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_p: Top-p sampling parameter
-            repetition_penalty: Repetition penalty
+            temperature: Sampling temperature (0 = deterministic)
+            top_p: Top-p (nucleus) sampling parameter
+            repetition_penalty: Repetition penalty factor
             stop_sequences: List of stop sequences
             stream: Whether to stream the response
             seed: Random seed for generation
             enable_thinking: Whether to enable thinking (None = auto)
             include_reasoning: Whether to include reasoning in response
+            top_k: Top-k sampling parameter (0 = disabled)
+            min_p: Min-p sampling parameter (0.0 = disabled)
+            min_tokens_to_keep: Minimum tokens to keep for min-p sampling
+            repetition_context_size: Context size for repetition penalty
             **kwargs: Additional MLX-LM parameters
         
         Returns:
@@ -107,7 +118,12 @@ class GenerationEngine:
                     model, tokenizer, prompt,
                     max_tokens, temperature, top_p,
                     repetition_penalty, stop_sequences,
-                    include_reasoning, **kwargs
+                    include_reasoning, 
+                    top_k=top_k,
+                    min_p=min_p,
+                    min_tokens_to_keep=min_tokens_to_keep,
+                    repetition_context_size=repetition_context_size,
+                    **kwargs
                 )
             else:
                 # Generate complete response
@@ -115,6 +131,10 @@ class GenerationEngine:
                     model, tokenizer, prompt,
                     max_tokens, temperature, top_p,
                     repetition_penalty, stop_sequences,
+                    top_k=top_k,
+                    min_p=min_p,
+                    min_tokens_to_keep=min_tokens_to_keep,
+                    repetition_context_size=repetition_context_size,
                     **kwargs
                 )
                 
@@ -241,36 +261,56 @@ class GenerationEngine:
         top_p: float,
         repetition_penalty: float,
         stop_sequences: Optional[List[str]],
+        top_k: int = 0,
+        min_p: float = 0.0,
+        min_tokens_to_keep: int = 1,
+        repetition_context_size: int = 20,
         **kwargs
     ) -> str:
         """
-        Generate complete response using MLX-LM.
+        Generate complete response using MLX-LM with proper sampling.
         """
         try:
-            # Filter out unsupported parameters from kwargs
-            # NOTE: Current MLX-LM only supports max_tokens and verbose
-            # Temperature, top_p, and other parameters are not yet supported
-            # So we are ignoring `**kwargs` for now
+            # Wrap tokenizer if needed
+            if not isinstance(tokenizer, TokenizerWrapper):
+                tokenizer = TokenizerWrapper(tokenizer)
             
-            # Use MLX-LM's generate function
+            # Add extra stop tokens to tokenizer
+            if stop_sequences:
+                for stop_seq in stop_sequences:
+                    tokenizer.add_eos_token(stop_seq)
+            
+            # Create sampler with all parameters
+            sampler = make_sampler(
+                temp=temperature,
+                top_p=top_p,
+                min_p=min_p,
+                min_tokens_to_keep=min_tokens_to_keep,
+                top_k=top_k
+            )
+            
+            # Create logits processors for repetition penalty
+            logits_processors = None
+            if repetition_penalty and repetition_penalty != 1.0:
+                logits_processors = make_logits_processors(
+                    repetition_penalty=repetition_penalty,
+                    repetition_context_size=repetition_context_size
+                )
+            
+            # Use the advanced generate function with proper sampling
             generated_text = mlx_generate(
                 model=model,
                 tokenizer=tokenizer,
                 prompt=prompt,
                 max_tokens=max_tokens,
-                verbose=False
+                verbose=False,
+                sampler=sampler,
+                logits_processors=logits_processors
             )
             
-            # Remove prompt from generated text
+            # Remove prompt from generated text if present
             if generated_text.startswith(prompt):
                 generated_text = generated_text[len(prompt):]
-            
-            # Apply stop sequences
-            if stop_sequences:
-                for stop_seq in stop_sequences:
-                    if stop_seq in generated_text:
-                        generated_text = generated_text.split(stop_seq)[0]
-                        break
             
             return generated_text.strip()
             
@@ -289,53 +329,79 @@ class GenerationEngine:
         repetition_penalty: float,
         stop_sequences: Optional[List[str]],
         include_reasoning: bool = True,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        min_tokens_to_keep: int = 1,
+        repetition_context_size: int = 20,
         **kwargs
     ) -> Iterator[Tuple[Optional[str], Optional[Dict[str, Any]]]]:
         """
-        Stream generation with thinking support.
+        Stream generation with thinking support using MLX-LM's stream_generate.
         
         Yields tuples of (text_chunk, reasoning_event).
         """
-        # Generate complete text first (MLX-LM doesn't have native streaming)
-        # In a real implementation, this would do token-by-token generation
-        result = self._generate_complete(
-            model, tokenizer, prompt,
-            max_tokens, temperature, top_p,
-            repetition_penalty, stop_sequences,
-            **kwargs
-        )
-        
-        # Simulate streaming with thinking manager processing
-        if self.thinking_manager and include_reasoning:
-            # Process in chunks for streaming effect
-            chunk_size = 10  # characters at a time
-            session_id = generate_id("stream")
+        try:
+            # Wrap tokenizer if needed
+            if not isinstance(tokenizer, TokenizerWrapper):
+                tokenizer = TokenizerWrapper(tokenizer)
             
-            for i in range(0, len(result), chunk_size):
-                chunk = result[i:i+chunk_size]
-                text, event = self.thinking_manager.process_streaming_chunk(
-                    chunk, session_id
+            # Add extra stop tokens to tokenizer
+            if stop_sequences:
+                for stop_seq in stop_sequences:
+                    tokenizer.add_eos_token(stop_seq)
+            
+            # Create sampler with all parameters
+            sampler = make_sampler(
+                temp=temperature,
+                top_p=top_p,
+                min_p=min_p,
+                min_tokens_to_keep=min_tokens_to_keep,
+                top_k=top_k
+            )
+            
+            # Create logits processors for repetition penalty
+            logits_processors = None
+            if repetition_penalty and repetition_penalty != 1.0:
+                logits_processors = make_logits_processors(
+                    repetition_penalty=repetition_penalty,
+                    repetition_context_size=repetition_context_size
                 )
+            
+            # Use MLX-LM's stream_generate for proper streaming
+            session_id = generate_id("stream") if self.thinking_manager else None
+            accumulated_text = ""
+            
+            for response in stream_generate(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors
+            ):
+                text_chunk = response.text
                 
-                if text or event:
-                    yield text, event
+                # Process through thinking manager if available
+                if self.thinking_manager and include_reasoning:
+                    accumulated_text += text_chunk
+                    processed_text, event = self.thinking_manager.process_streaming_chunk(
+                        text_chunk, session_id
+                    )
+                    
+                    if processed_text or event:
+                        yield processed_text, event
+                else:
+                    # Direct streaming without thinking processing
+                    if text_chunk:
+                        yield text_chunk, None
             
-            # Reset streaming state
-            self.thinking_manager.reset_streaming_state(session_id)
-        else:
-            # Simple streaming without thinking processing
-            chunk_size = 5  # words at a time
-            words = result.split()
-            current_chunk = []
-            
-            for word in words:
-                current_chunk.append(word)
-                if len(current_chunk) >= chunk_size:
-                    yield ' '.join(current_chunk) + ' ', None
-                    current_chunk = []
-            
-            if current_chunk:
-                yield ' '.join(current_chunk), None
+            # Reset streaming state if using thinking manager
+            if self.thinking_manager and session_id:
+                self.thinking_manager.reset_streaming_state(session_id)
+                
+        except Exception as e:
+            logger.error(f"Stream generation failed: {e}", exc_info=True)
+            raise
     
     def count_tokens(self, tokenizer: Any, text: str) -> int:
         """
