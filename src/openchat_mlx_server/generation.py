@@ -248,11 +248,9 @@ class GenerationEngine:
         """
         try:
             # Filter out unsupported parameters from kwargs
-            # MLX currently supports only specific parameters
-            supported_kwargs = {}
-            for key, value in kwargs.items():
-                if key not in ['top_p', 'repetition_penalty', 'temperature']:
-                    supported_kwargs[key] = value
+            # NOTE: Current MLX-LM only supports max_tokens and verbose
+            # Temperature, top_p, and other parameters are not yet supported
+            # So we are ignoring `**kwargs` for now
             
             # Use MLX-LM's generate function
             generated_text = mlx_generate(
@@ -260,8 +258,7 @@ class GenerationEngine:
                 tokenizer=tokenizer,
                 prompt=prompt,
                 max_tokens=max_tokens,
-                verbose=False,
-                **supported_kwargs
+                verbose=False
             )
             
             # Remove prompt from generated text
