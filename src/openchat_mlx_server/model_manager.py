@@ -155,7 +155,8 @@ class MLXModelManager:
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    metadata["architecture"] = config.get("architectures", [None])[0]
+                    architectures = config.get("architectures", [])
+                    metadata["architecture"] = architectures[0] if architectures else None
                     metadata["type"] = detect_model_type(model_path)
             except Exception as e:
                 logger.warning(f"Failed to read config.json: {e}")
@@ -336,3 +337,10 @@ class MLXModelManager:
         except Exception as e:
             logger.error(f"Failed to unload model: {e}", exc_info=True)
             return False, f"Failed to unload model: {str(e)}"
+    
+    def cleanup(self) -> None:
+        """
+        Cleanup model resources.
+        Alias for unload_model for test compatibility.
+        """
+        self.unload_model()

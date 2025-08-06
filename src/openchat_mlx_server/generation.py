@@ -247,14 +247,21 @@ class GenerationEngine:
         Generate complete response using MLX-LM.
         """
         try:
+            # Filter out unsupported parameters from kwargs
+            # MLX currently supports only specific parameters
+            supported_kwargs = {}
+            for key, value in kwargs.items():
+                if key not in ['top_p', 'repetition_penalty', 'temperature']:
+                    supported_kwargs[key] = value
+            
             # Use MLX-LM's generate function
-            # Note: temperature, top_p, and repetition_penalty are not yet supported by MLX-LM
             generated_text = mlx_generate(
                 model=model,
                 tokenizer=tokenizer,
                 prompt=prompt,
                 max_tokens=max_tokens,
-                verbose=False
+                verbose=False,
+                **supported_kwargs
             )
             
             # Remove prompt from generated text

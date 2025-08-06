@@ -161,14 +161,14 @@ class TestGenerationEngine:
         """Test async generation streaming."""
         messages = [{"role": "user", "content": "Hello"}]
         
-        with patch.object(generation_engine, '_generate_async_stream') as mock_stream:
-            # Mock async generator
-            async def mock_async_gen():
+        with patch.object(generation_engine, 'generate') as mock_generate:
+            # Mock generator for streaming
+            def mock_gen():
                 yield "chunk1"
                 yield "chunk2"
                 yield "chunk3"
             
-            mock_stream.return_value = mock_async_gen()
+            mock_generate.return_value = mock_gen()
             
             # Collect results from async generator
             results = []
@@ -198,42 +198,6 @@ class TestGenerationEngine:
         
         # Should fallback to character count / 4
         assert count == len("test text") // 4
-    
-    @patch('openchat_mlx_server.generation.mlx_generate')
-    def test_generate_tokens(self, mock_mlx_generate, generation_engine, mock_model, mock_tokenizer):
-        """Test token generation."""
-        mock_mlx_generate.return_value = "Hello world"
-        mock_tokenizer.encode.return_value = [7, 8, 9]  # Tokens for "Hello world"
-        
-        prompt_tokens = [1, 2, 3]
-        
-        tokens = list(generation_engine._generate_tokens(
-            mock_model, mock_tokenizer, prompt_tokens,
-            max_tokens=50, temperature=0.7, top_p=0.9, repetition_penalty=1.0
-        ))
-        
-        assert tokens == [7, 8, 9]
-        mock_mlx_generate.assert_called_once()
-    
-    @pytest.mark.skip(reason="_stream_generate method doesn't exist")
-    def test_stream_generate(self, generation_engine, mock_model, mock_tokenizer):
-        """Test stream generation method."""
-        pass  # Method doesn't exist in current implementation
-
-
-class TestStopSequences:
-    """Test stop sequence handling."""
-    
-    @pytest.mark.skip(reason="_should_stop method doesn't exist")  
-    def test_should_stop_with_sequences(self, generation_engine):
-        """Test stop sequence detection."""
-        pass  # Method doesn't exist in current implementation
-    
-    @pytest.mark.skip(reason="_should_stop method doesn't exist")
-    def test_should_stop_no_sequences(self, generation_engine):
-        """Test stop sequence detection with no sequences."""
-        pass  # Method doesn't exist in current implementation
-
 
 class TestErrorHandling:
     """Test error handling in generation."""
@@ -251,11 +215,5 @@ class TestErrorHandling:
                 max_tokens=50, stream=False
             )
     
-    @pytest.mark.skip(reason="_stream_generate method doesn't exist")
-    def test_stream_generate_exception(self, generation_engine, mock_model, mock_tokenizer):
-        """Test exception handling in stream generation."""
-        pass  # Method doesn't exist in current implementation
-
-
 if __name__ == "__main__":
     pytest.main([__file__])

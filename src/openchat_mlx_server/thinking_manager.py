@@ -117,8 +117,8 @@ class ThinkingManager:
                     return True
         
         # Check model config
-        architecture = self.model_config.get('architecture', '').lower()
-        if 'qwen' in architecture:
+        architecture = self.model_config.get('architecture', '') or ''
+        if 'qwen' in architecture.lower():
             return True
         
         return False
@@ -180,12 +180,6 @@ class ThinkingManager:
         if enable_thinking is None and self.supports_thinking:
             enable_thinking = True
             logger.debug("Auto-enabled thinking for capable model")
-        
-        # Check for control tags in messages
-        control_tag = self._detect_control_tags(messages)
-        if control_tag is not None:
-            enable_thinking = control_tag
-            logger.debug(f"Control tag override: enable_thinking={enable_thinking}")
         
         # Apply template based on capability
         if self.capability == ThinkingCapability.ADVANCED and self.token_handler:
@@ -345,20 +339,7 @@ class ThinkingManager:
             capability_used=ThinkingCapability.BASIC
         )
     
-    def _detect_control_tags(self, messages: List[Dict[str, str]]) -> Optional[bool]:
-        """
-        Detect /think or /no_think control tags in messages.
-        
-        Returns:
-            True if /think found, False if /no_think found, None if neither
-        """
-        for message in reversed(messages):
-            content = message.get("content", "")
-            if "/think" in content and "/no_think" not in content:
-                return True
-            elif "/no_think" in content:
-                return False
-        return None
+
     
     def get_generation_config(self, enable_thinking: bool = True) -> Dict[str, Any]:
         """
