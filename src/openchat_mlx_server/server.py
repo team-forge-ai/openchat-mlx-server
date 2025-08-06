@@ -41,6 +41,7 @@ from .utils import (
     generate_id,
     format_timestamp,
 )
+# Thinking is now handled by ThinkingManager
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,11 @@ class MLXServer:
         async def server_status():
             """Get server status."""
             return self._get_server_status()
+        
+        @app.get("/model/info")
+        async def model_info():
+            """Get detailed model information."""
+            return self._get_detailed_model_info()
     
     async def _startup(self):
         """Server startup tasks."""
@@ -152,6 +158,10 @@ class MLXServer:
         # Model is already loaded in main.py before server starts
         if self.model_manager.model_info:
             logger.info("Model is ready for inference")
+            # Connect generation engine to model's thinking manager
+            thinking_manager = self.model_manager.get_thinking_manager()
+            self.generation_engine.set_thinking_manager(thinking_manager)
+            logger.info(f"Thinking manager connected: {thinking_manager.capability.value if thinking_manager else 'none'}")
     
     async def _shutdown(self):
         """Server shutdown tasks."""
@@ -165,7 +175,7 @@ class MLXServer:
             await asyncio.sleep(1)
         
         # Clean up models
-        self.model_manager.cleanup()
+        self.model_manager.unload_model()
         
         # Clean up PID file
         self.process_manager.cleanup()
@@ -201,6 +211,10 @@ class MLXServer:
             # Convert messages to format expected by generation engine
             messages = [msg.model_dump() for msg in request.messages]
             
+            # Thinking is handled automatically by ThinkingManager
+            # which auto-enables for capable models and checks control tags
+            enable_thinking = request.enable_thinking
+            
             # Generate response
             if request.stream:
                 # Return streaming response
@@ -209,7 +223,8 @@ class MLXServer:
                         request_id,
                         model_info,
                         messages,
-                        request
+                        request,
+                        enable_thinking
                     ),
                     media_type="text/event-stream"
                 )
@@ -226,16 +241,35 @@ class MLXServer:
                     repetition_penalty=1.0,  # Map from frequency_penalty if needed
                     stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
                     stream=False,
-                    seed=request.seed
+                    seed=request.seed,
+                    enable_thinking=enable_thinking,
+                    include_reasoning=request.include_reasoning
                 )
                 # For non-streaming, collect the single yielded result
-                generated_text = None
-                async for text in async_gen:
-                    generated_text = text
+                result = None
+                async for res in async_gen:
+                    result = res
                     break  # Only one result for non-streaming
                 
+                # Handle result based on whether it includes reasoning
+                reasoning_item = None
+                reasoning_tokens = 0
+                if isinstance(result, tuple) and len(result) == 2:
+                    generated_text, reasoning_item = result
+                    # Count reasoning tokens if present
+                    if reasoning_item and reasoning_item.content:
+                        reasoning_tokens = self.generation_engine.count_tokens(
+                            model_info.tokenizer,
+                            reasoning_item.content
+                        )
+                else:
+                    generated_text = result
+                
                 # Count tokens
-                prompt_text = self.model_manager.format_chat_template(messages)
+                prompt_text = self.model_manager.format_chat_template(
+                    messages,
+                    enable_thinking=enable_thinking
+                )
                 prompt_tokens = self.generation_engine.count_tokens(
                     model_info.tokenizer,
                     prompt_text
@@ -252,7 +286,9 @@ class MLXServer:
                     content=generated_text,
                     finish_reason="stop",
                     prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens
+                    completion_tokens=completion_tokens,
+                    reasoning_item=reasoning_item,
+                    reasoning_tokens=reasoning_tokens
                 )
         
         except HTTPException:
@@ -271,7 +307,8 @@ class MLXServer:
         request_id: str,
         model_info: Any,
         messages: list,
-        request: ChatCompletionRequest
+        request: ChatCompletionRequest,
+        enable_thinking: Optional[bool] = None
     ) -> AsyncIterator[str]:
         """
         Stream chat completion response.
@@ -289,7 +326,7 @@ class MLXServer:
             yield f"data: {initial_chunk.model_dump_json()}\n\n"
             
             # Generate and stream response
-            async for chunk in self.generation_engine.generate_async(
+            async for result in self.generation_engine.generate_async(
                 model_info.model,
                 model_info.tokenizer,
                 messages,
@@ -299,15 +336,44 @@ class MLXServer:
                 repetition_penalty=1.0,
                 stop_sequences=request.stop if isinstance(request.stop, list) else [request.stop] if request.stop else None,
                 stream=True,
-                seed=request.seed
+                seed=request.seed,
+                enable_thinking=enable_thinking,
+                parse_thinking=request.include_reasoning and model_info.supports_thinking
             ):
-                # Create response chunk
-                response_chunk = create_stream_response_chunk(
-                    request_id=request_id,
-                    model=request.model,
-                    content=chunk
-                )
-                yield f"data: {response_chunk.model_dump_json()}\n\n"
+                # Handle streaming result with potential reasoning events
+                if isinstance(result, tuple) and len(result) == 2:
+                    chunk, reasoning_event = result
+                else:
+                    chunk = result
+                    reasoning_event = None
+                
+                # Create response chunk with content and/or reasoning event
+                # Convert ReasoningEvent to dict if needed
+                reasoning_event_dict = None
+                if reasoning_event:
+                    if hasattr(reasoning_event, 'model_dump'):
+                        reasoning_event_dict = reasoning_event.model_dump()
+                    elif hasattr(reasoning_event, '__dict__'):
+                        reasoning_event_dict = reasoning_event.__dict__
+                    else:
+                        reasoning_event_dict = reasoning_event
+                
+                if chunk:
+                    response_chunk = create_stream_response_chunk(
+                        request_id=request_id,
+                        model=request.model,
+                        content=chunk,
+                        reasoning_event=reasoning_event_dict
+                    )
+                    yield f"data: {response_chunk.model_dump_json()}\n\n"
+                elif reasoning_event_dict:
+                    # Send reasoning-only event
+                    response_chunk = create_stream_response_chunk(
+                        request_id=request_id,
+                        model=request.model,
+                        reasoning_event=reasoning_event_dict
+                    )
+                    yield f"data: {response_chunk.model_dump_json()}\n\n"
             
             # Send final chunk
             final_chunk = create_stream_response_chunk(
@@ -376,11 +442,11 @@ class MLXServer:
     
     def _get_model_info(self) -> ModelListResponse:
         """Get information about the loaded model."""
-        model_info = self.model_manager.get_model_info()
+        model_status = self.model_manager.get_model_status()
         
-        if model_info:
+        if model_status.get("loaded", False):
             # Use the model path name as the ID
-            model_id = Path(model_info["path"]).name
+            model_id = Path(model_status["path"]).name
             return ModelListResponse(
                 data=[
                     APIModelInfo(
@@ -396,22 +462,43 @@ class MLXServer:
     
     def _get_server_status(self) -> Dict[str, Any]:
         """Get comprehensive server status."""
-        manager_status = self.model_manager.get_status()
-        system_info = manager_status["system"]
+        model_status = self.model_manager.get_model_status()
+        system_info = self.system_monitor.get_system_info()
         
         return {
-            "status": "healthy" if manager_status["model_loaded"] else "no_model",
-            "model_loaded": manager_status["model_loaded"],
-            "model_info": manager_status["model_info"],
-            "memory_usage": system_info["memory"],
-            "cpu_usage": system_info["cpu"],
-            "gpu_usage": system_info["gpu"],
-            "uptime": system_info["uptime"],
-            "mlx_version": system_info["gpu"].get("mlx_version", "unknown"),
+            "status": "healthy" if model_status.get("loaded", False) else "no_model",
+            "model_loaded": model_status.get("loaded", False),
+            "model_info": model_status if model_status.get("loaded", False) else None,
+            "memory_usage": system_info.get("memory", {}),
+            "cpu_usage": system_info.get("cpu", {}),
+            "gpu_usage": system_info.get("gpu", {}),
+            "uptime": system_info.get("uptime", 0),
+            "mlx_version": system_info.get("gpu", {}).get("mlx_version", "unknown"),
             "server_version": __version__,
             "active_requests": self.active_requests,
             "total_requests": self.total_requests
         }
+    
+    def _get_detailed_model_info(self) -> Dict[str, Any]:
+        """Get detailed model information for /model/info endpoint."""
+        model_status = self.model_manager.get_model_status()
+        
+        if model_status.get("loaded", False):
+            return {
+                "path": model_status["path"],
+                "type": model_status["type"],
+                "architecture": model_status.get("architecture"),
+                "supports_thinking": model_status.get("supports_thinking", False),
+                "thinking_capability": model_status.get("thinking_capability", "none"),
+                "loaded_at": model_status.get("loaded_at"),
+                "memory_usage": model_status.get("memory_usage")
+            }
+        else:
+            return {
+                "loaded": False,
+                "supports_thinking": False,
+                "thinking_capability": "none"
+            }
     
     async def _validation_error_handler(self, request: Request, exc: RequestValidationError):
         """Handle validation errors."""

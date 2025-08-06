@@ -347,8 +347,7 @@ def main():
         print(f"Loading model from: {config.model_path}")
         
         success, message = server.model_manager.load_model(
-            model_path=config.model_path,
-            adapter_path=config.adapter_path
+            model_path=config.model_path
         )
         
         if not success:

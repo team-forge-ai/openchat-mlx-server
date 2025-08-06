@@ -1,26 +1,42 @@
-"""Generation engine for MLX inference."""
+"""
+Unified generation engine for MLX inference with thinking support.
+"""
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional, Union, Iterator, AsyncIterator
+from typing import List, Dict, Any, Optional, Union, Iterator, AsyncIterator, Tuple
 import time
 
 import mlx.core as mx
 from mlx_lm import generate as mlx_generate
 
-from .api_models import ChatMessage
+from .api_models import ChatMessage, ReasoningItem
 from .utils import generate_id
+from .thinking_manager import ThinkingManager, ThinkingResult, ReasoningEvent
 
 logger = logging.getLogger(__name__)
 
 
 class GenerationEngine:
-    """Core generation engine using MLX-LM."""
+    """
+    Unified generation engine using MLX-LM with native thinking support.
+    
+    This engine handles:
+    - Text generation with MLX models
+    - Thinking/reasoning extraction
+    - Streaming responses
+    - Token counting
+    """
     
     def __init__(self):
         """Initialize the generation engine."""
         self.active_generations = {}
         self._generation_lock = asyncio.Lock()
+        self.thinking_manager = None  # Set per-model
+    
+    def set_thinking_manager(self, thinking_manager: Optional[ThinkingManager]):
+        """Set the thinking manager for the current model."""
+        self.thinking_manager = thinking_manager
     
     def generate(
         self,
@@ -34,10 +50,12 @@ class GenerationEngine:
         stop_sequences: Optional[List[str]] = None,
         stream: bool = False,
         seed: Optional[int] = None,
+        enable_thinking: Optional[bool] = None,
+        include_reasoning: bool = True,
         **kwargs
-    ) -> Union[str, Iterator[str]]:
+    ) -> Union[str, Iterator[str], Tuple[str, Optional[ReasoningItem]]]:
         """
-        Generate text using MLX model.
+        Generate text using MLX model with thinking support.
         
         Args:
             model: MLX model object
@@ -50,14 +68,23 @@ class GenerationEngine:
             stop_sequences: List of stop sequences
             stream: Whether to stream the response
             seed: Random seed for generation
+            enable_thinking: Whether to enable thinking (None = auto)
+            include_reasoning: Whether to include reasoning in response
             **kwargs: Additional MLX-LM parameters
         
         Returns:
-            Generated text or iterator of text chunks
+            Generated text, iterator of text chunks, or tuple with reasoning item
         """
-        # Format messages to prompt if needed
+        # Format messages using thinking manager if available
         if isinstance(messages, list):
-            prompt = self._format_messages_to_prompt(messages, tokenizer)
+            if self.thinking_manager:
+                prompt = self.thinking_manager.apply_chat_template(
+                    messages, 
+                    enable_thinking=enable_thinking,
+                    add_generation_prompt=True
+                )
+            else:
+                prompt = self._format_messages_to_prompt(messages, tokenizer)
         else:
             prompt = messages
         
@@ -67,21 +94,47 @@ class GenerationEngine:
         if seed is not None:
             mx.random.seed(seed)
         
+        # Get generation config from thinking manager
+        if self.thinking_manager and enable_thinking:
+            gen_config = self.thinking_manager.get_generation_config(enable_thinking)
+            # Add stop tokens from config
+            if 'stop_tokens' in gen_config:
+                stop_sequences = (stop_sequences or []) + gen_config['stop_tokens']
+        
         try:
             if stream:
                 return self._generate_stream(
                     model, tokenizer, prompt,
                     max_tokens, temperature, top_p,
                     repetition_penalty, stop_sequences,
-                    **kwargs
+                    include_reasoning, **kwargs
                 )
             else:
-                return self._generate_complete(
+                # Generate complete response
+                result = self._generate_complete(
                     model, tokenizer, prompt,
                     max_tokens, temperature, top_p,
                     repetition_penalty, stop_sequences,
                     **kwargs
                 )
+                
+                # Extract reasoning if thinking manager is available
+                if self.thinking_manager and include_reasoning:
+                    thinking_result = self.thinking_manager.extract_reasoning(
+                        result, include_reasoning
+                    )
+                    
+                    if thinking_result.reasoning_content:
+                        reasoning_item = ReasoningItem(
+                            id=thinking_result.reasoning_id,
+                            content=thinking_result.reasoning_content
+                        )
+                        return thinking_result.content, reasoning_item
+                    else:
+                        return result, None
+                else:
+                    return result
+                    
         except Exception as e:
             logger.error(f"Generation failed: {e}", exc_info=True)
             raise
@@ -98,35 +151,42 @@ class GenerationEngine:
         stop_sequences: Optional[List[str]] = None,
         stream: bool = False,
         seed: Optional[int] = None,
+        enable_thinking: Optional[bool] = None,
+        include_reasoning: bool = True,
         **kwargs
-    ):
+    ) -> AsyncIterator:
         """
-        Async version of generate method.
+        Async wrapper for generation.
         
-        Returns:
-            Generated text or async iterator of text chunks
+        Yields results asynchronously for both streaming and non-streaming modes.
         """
-        # Run generation in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        
         if stream:
-            # For streaming, yield chunks
-            async for chunk in self._generate_async_stream(
-                model, tokenizer, messages,
-                max_tokens, temperature, top_p,
-                repetition_penalty, stop_sequences,
-                seed, **kwargs
-            ):
+            # Run sync generator in thread for streaming
+            def gen():
+                return self.generate(
+                    model, tokenizer, messages,
+                    max_tokens, temperature, top_p,
+                    repetition_penalty, stop_sequences,
+                    stream=True, seed=seed,
+                    enable_thinking=enable_thinking,
+                    include_reasoning=include_reasoning,
+                    **kwargs
+                )
+            
+            generator = await asyncio.to_thread(gen)
+            for chunk in generator:
                 yield chunk
         else:
-            # For non-streaming, run in executor and yield single result
-            result = await loop.run_in_executor(
-                None,
+            # For non-streaming, run in thread and yield once
+            result = await asyncio.to_thread(
                 self.generate,
                 model, tokenizer, messages,
                 max_tokens, temperature, top_p,
                 repetition_penalty, stop_sequences,
-                False, seed
+                stream=False, seed=seed,
+                enable_thinking=enable_thinking,
+                include_reasoning=include_reasoning,
+                **kwargs
             )
             yield result
     
@@ -136,16 +196,8 @@ class GenerationEngine:
         tokenizer: Any
     ) -> str:
         """
-        Format messages to a prompt string using chat template.
-        
-        Args:
-            messages: List of message dictionaries
-            tokenizer: Tokenizer object
-        
-        Returns:
-            Formatted prompt string
+        Fallback message formatting when no thinking manager available.
         """
-        # Try to use tokenizer's chat template
         if hasattr(tokenizer, "apply_chat_template"):
             try:
                 prompt = tokenizer.apply_chat_template(
@@ -158,7 +210,7 @@ class GenerationEngine:
             except Exception as e:
                 logger.warning(f"Failed to apply chat template: {e}")
         
-        # Fallback to manual formatting
+        # Manual formatting fallback
         formatted = []
         for msg in messages:
             role = msg.get("role", "user")
@@ -192,58 +244,34 @@ class GenerationEngine:
         **kwargs
     ) -> str:
         """
-        Generate complete response without streaming.
-        
-        Returns:
-            Complete generated text
+        Generate complete response using MLX-LM.
         """
-        start_time = time.time()
-        
-        # Prepare generation parameters
-        # NOTE: Current MLX-LM only supports max_tokens and verbose
-        # Temperature, top_p, and other parameters are not yet supported
-        gen_params = {
-            "max_tokens": max_tokens,
-            "verbose": False,  # Disable verbose output
-        }
-        
-        # Log if unsupported parameters are requested
-        if temperature != 1.0:
-            logger.debug(f"Temperature {temperature} requested but not supported by MLX-LM")
-        if top_p != 1.0:
-            logger.debug(f"Top-p {top_p} requested but not supported by MLX-LM")
-        if repetition_penalty != 1.0:
-            logger.debug(f"Repetition penalty {repetition_penalty} requested but not supported by MLX-LM")
-        
-        # Generate text
         try:
-            response = mlx_generate(
-                model,
-                tokenizer,
+            # Use MLX-LM's generate function
+            # Note: temperature, top_p, and repetition_penalty are not yet supported by MLX-LM
+            generated_text = mlx_generate(
+                model=model,
+                tokenizer=tokenizer,
                 prompt=prompt,
-                **gen_params
+                max_tokens=max_tokens,
+                verbose=False
             )
             
-            # Extract generated text (remove prompt)
-            if response.startswith(prompt):
-                generated_text = response[len(prompt):].strip()
-            else:
-                generated_text = response.strip()
+            # Remove prompt from generated text
+            if generated_text.startswith(prompt):
+                generated_text = generated_text[len(prompt):]
             
-            # Apply stop sequences if any
+            # Apply stop sequences
             if stop_sequences:
                 for stop_seq in stop_sequences:
                     if stop_seq in generated_text:
                         generated_text = generated_text.split(stop_seq)[0]
                         break
             
-            generation_time = time.time() - start_time
-            logger.info(f"Generated {len(generated_text)} chars in {generation_time:.2f}s")
-            
-            return generated_text
+            return generated_text.strip()
             
         except Exception as e:
-            logger.error(f"Generation failed: {e}")
+            logger.error(f"Generation failed: {e}", exc_info=True)
             raise
     
     def _generate_stream(
@@ -256,196 +284,54 @@ class GenerationEngine:
         top_p: float,
         repetition_penalty: float,
         stop_sequences: Optional[List[str]],
+        include_reasoning: bool = True,
         **kwargs
-    ) -> Iterator[str]:
+    ) -> Iterator[Tuple[Optional[str], Optional[Dict[str, Any]]]]:
         """
-        Generate response with streaming.
+        Stream generation with thinking support.
         
-        Yields:
-            Text chunks as they are generated
+        Yields tuples of (text_chunk, reasoning_event).
         """
-        try:
-            # Tokenize the prompt
-            prompt_tokens = tokenizer.encode(prompt)
+        # Generate complete text first (MLX-LM doesn't have native streaming)
+        # In a real implementation, this would do token-by-token generation
+        result = self._generate_complete(
+            model, tokenizer, prompt,
+            max_tokens, temperature, top_p,
+            repetition_penalty, stop_sequences,
+            **kwargs
+        )
+        
+        # Simulate streaming with thinking manager processing
+        if self.thinking_manager and include_reasoning:
+            # Process in chunks for streaming effect
+            chunk_size = 10  # characters at a time
+            session_id = generate_id("stream")
             
-            # Initialize generation
-            generated_tokens = []
-            total_generated = 0
-            
-            # MLX-LM streaming implementation
-            # This is a simplified version - actual implementation may vary
-            for token in self._generate_tokens(
-                model,
-                tokenizer,
-                prompt_tokens,
-                max_tokens,
-                temperature,
-                top_p,
-                repetition_penalty
-            ):
-                generated_tokens.append(token)
-                total_generated += 1
-                
-                # Decode the new token(s)
-                text = tokenizer.decode(generated_tokens)
-                
-                # Check for stop sequences
-                should_stop = False
-                if stop_sequences:
-                    for stop_seq in stop_sequences:
-                        if stop_seq in text:
-                            text = text.split(stop_seq)[0]
-                            should_stop = True
-                            break
-                
-                # Yield the text chunk
-                if text:
-                    yield text
-                    generated_tokens = []  # Reset for next chunk
-                
-                if should_stop or total_generated >= max_tokens:
-                    break
-                    
-        except Exception as e:
-            logger.error(f"Streaming generation failed: {e}")
-            raise
-    
-    def _generate_tokens(
-        self,
-        model: Any,
-        tokenizer: Any,
-        prompt_tokens: List[int],
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        repetition_penalty: float
-    ) -> Iterator[int]:
-        """
-        Generate tokens one by one.
-        
-        Yields:
-            Token IDs as they are generated
-        """
-        # This is a placeholder implementation
-        # The actual implementation depends on MLX-LM's streaming capabilities
-        
-        # For now, generate complete and yield tokens
-        # In production, this should use MLX-LM's actual streaming API
-        try:
-            # Generate complete response
-            # NOTE: MLX-LM currently only supports max_tokens and verbose
-            response = mlx_generate(
-                model,
-                tokenizer,
-                prompt=tokenizer.decode(prompt_tokens),
-                max_tokens=max_tokens,
-                verbose=False
-            )
-            
-            # Tokenize response and yield tokens
-            # Note: MLX-LM's generate returns only the generated text, not prompt + response
-            response_tokens = tokenizer.encode(response)
-            
-            for token in response_tokens:
-                yield token
-                
-        except Exception as e:
-            logger.error(f"Token generation failed: {e}")
-            raise
-    
-    async def _generate_async_stream(
-        self,
-        model: Any,
-        tokenizer: Any,
-        messages: Union[str, List[Dict[str, str]]],
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        repetition_penalty: float,
-        stop_sequences: Optional[List[str]],
-        seed: Optional[int],
-        **kwargs
-    ):
-        """
-        Generate response with async streaming.
-        
-        Yields:
-            Text chunks as they are generated
-        """
-        # Run the sync generator in a thread pool
-        loop = asyncio.get_event_loop()
-        
-        # Create a queue for communication
-        queue = asyncio.Queue()
-        generation_id = generate_id("gen")
-        
-        async def generate_worker():
-            """Worker to run generation in thread pool."""
-            try:
-                # Run sync generation in executor
-                await loop.run_in_executor(
-                    None,
-                    self._run_stream_generation,
-                    model, tokenizer, messages,
-                    max_tokens, temperature, top_p,
-                    repetition_penalty, stop_sequences,
-                    seed, queue, generation_id, loop
+            for i in range(0, len(result), chunk_size):
+                chunk = result[i:i+chunk_size]
+                text, event = self.thinking_manager.process_streaming_chunk(
+                    chunk, session_id
                 )
-            except Exception as e:
-                await queue.put(("error", str(e)))
-            finally:
-                await queue.put(("done", None))
-        
-        # Start generation in background
-        asyncio.create_task(generate_worker())
-        
-        # Yield results from queue
-        while True:
-            msg_type, content = await queue.get()
+                
+                if text or event:
+                    yield text, event
             
-            if msg_type == "error":
-                raise Exception(f"Generation error: {content}")
-            elif msg_type == "done":
-                break
-            elif msg_type == "chunk":
-                yield content
-    
-    def _run_stream_generation(
-        self,
-        model: Any,
-        tokenizer: Any,
-        messages: Union[str, List[Dict[str, str]]],
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        repetition_penalty: float,
-        stop_sequences: Optional[List[str]],
-        seed: Optional[int],
-        queue: asyncio.Queue,
-        generation_id: str,
-        loop: asyncio.AbstractEventLoop
-    ):
-        """
-        Run streaming generation and put results in queue.
-        """
-        try:
-            # Generate with streaming
-            for chunk in self.generate(
-                model, tokenizer, messages,
-                max_tokens, temperature, top_p,
-                repetition_penalty, stop_sequences,
-                stream=True, seed=seed
-            ):
-                # Put chunk in queue
-                asyncio.run_coroutine_threadsafe(
-                    queue.put(("chunk", chunk)),
-                    loop
-                )
-        except Exception as e:
-            asyncio.run_coroutine_threadsafe(
-                queue.put(("error", str(e))),
-                loop
-            )
+            # Reset streaming state
+            self.thinking_manager.reset_streaming_state(session_id)
+        else:
+            # Simple streaming without thinking processing
+            chunk_size = 5  # words at a time
+            words = result.split()
+            current_chunk = []
+            
+            for word in words:
+                current_chunk.append(word)
+                if len(current_chunk) >= chunk_size:
+                    yield ' '.join(current_chunk) + ' ', None
+                    current_chunk = []
+            
+            if current_chunk:
+                yield ' '.join(current_chunk), None
     
     def count_tokens(self, tokenizer: Any, text: str) -> int:
         """
@@ -454,14 +340,30 @@ class GenerationEngine:
         Args:
             tokenizer: Tokenizer object
             text: Text to count tokens for
-        
+            
         Returns:
             Number of tokens
         """
         try:
-            tokens = tokenizer.encode(text)
-            return len(tokens)
+            return len(tokenizer.encode(text))
         except Exception as e:
             logger.warning(f"Failed to count tokens: {e}")
-            # Rough estimate: 1 token per 4 characters
+            # Rough estimate: 1 token ≈ 4 characters
             return len(text) // 4
+    
+    def cancel_generation(self, generation_id: str) -> bool:
+        """
+        Cancel an active generation.
+        
+        Args:
+            generation_id: ID of generation to cancel
+            
+        Returns:
+            True if cancelled, False if not found
+        """
+        if generation_id in self.active_generations:
+            # In a real implementation, this would signal the generation to stop
+            del self.active_generations[generation_id]
+            logger.info(f"Cancelled generation: {generation_id}")
+            return True
+        return False

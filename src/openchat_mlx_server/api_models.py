@@ -6,6 +6,24 @@ from datetime import datetime
 import time
 
 
+# Reasoning/Thinking Models
+class ReasoningItem(BaseModel):
+    """Reasoning item for thinking content."""
+    id: str
+    type: Literal["reasoning"] = "reasoning"
+    content: Optional[str] = None  # Full thinking content (for transparency)
+    summary: Optional[str] = None  # Brief summary of reasoning
+    status: Literal["in_progress", "completed", "incomplete"] = "completed"
+
+
+class ReasoningUsage(BaseModel):
+    """Usage statistics including reasoning tokens."""
+    prompt_tokens: int
+    completion_tokens: int
+    reasoning_tokens: int = 0  # Tokens used for thinking
+    total_tokens: int
+
+
 # Chat Completion Models
 class ChatMessage(BaseModel):
     """Chat message format."""
@@ -30,6 +48,9 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     seed: Optional[int] = None
+    # Thinking/reasoning parameters (Qwen3 style)
+    enable_thinking: Optional[bool] = None  # None = auto (enabled for capable models, disabled otherwise)
+    include_reasoning: Optional[bool] = True  # Include reasoning in response
     
     @field_validator('messages')
     def validate_messages(cls, v):
@@ -44,6 +65,7 @@ class ChatCompletionResponseChoice(BaseModel):
     message: ChatMessage
     finish_reason: Optional[Literal["stop", "length", "content_filter", "function_call"]]
     logprobs: Optional[Any] = None
+    reasoning: Optional[ReasoningItem] = None  # Reasoning/thinking content
 
 
 class ChatCompletionResponseUsage(BaseModel):
@@ -70,6 +92,7 @@ class ChatCompletionStreamChoice(BaseModel):
     delta: Dict[str, Any]
     finish_reason: Optional[Literal["stop", "length", "content_filter", "function_call"]] = None
     logprobs: Optional[Any] = None
+    reasoning_event: Optional[Dict[str, Any]] = None  # Streaming reasoning events
 
 
 class ChatCompletionStreamResponse(BaseModel):
@@ -189,9 +212,14 @@ def create_chat_completion_response(
     content: str = "",
     finish_reason: str = "stop",
     prompt_tokens: int = 0,
-    completion_tokens: int = 0
+    completion_tokens: int = 0,
+    reasoning_item: Optional[ReasoningItem] = None,
+    reasoning_tokens: int = 0
 ) -> ChatCompletionResponse:
     """Create a standard chat completion response."""
+    # Calculate total tokens including reasoning
+    total_completion = completion_tokens + reasoning_tokens
+    
     return ChatCompletionResponse(
         id=request_id,
         created=int(time.time()),
@@ -200,13 +228,14 @@ def create_chat_completion_response(
             ChatCompletionResponseChoice(
                 index=0,
                 message=ChatMessage(role="assistant", content=content),
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                reasoning=reasoning_item
             )
         ],
         usage=ChatCompletionResponseUsage(
             prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens
+            completion_tokens=total_completion,
+            total_tokens=prompt_tokens + total_completion
         )
     )
 
@@ -216,7 +245,8 @@ def create_stream_response_chunk(
     model: Optional[str] = None,
     content: Optional[str] = None,
     finish_reason: Optional[str] = None,
-    role: Optional[str] = None
+    role: Optional[str] = None,
+    reasoning_event: Optional[Dict[str, Any]] = None
 ) -> ChatCompletionStreamResponse:
     """Create a streaming response chunk."""
     delta = {}
@@ -233,7 +263,8 @@ def create_stream_response_chunk(
             ChatCompletionStreamChoice(
                 index=0,
                 delta=delta,
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                reasoning_event=reasoning_event
             )
         ]
     )
