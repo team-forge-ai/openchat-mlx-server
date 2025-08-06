@@ -19,7 +19,6 @@ from .utils import (
     format_bytes,
     SystemMonitor
 )
-from .thinking_manager import ThinkingManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +54,6 @@ class MLXModelManager:
     def __init__(self):
         """Initialize the model manager."""
         self.model_info: Optional[ModelInfo] = None
-        self.thinking_manager: Optional[ThinkingManager] = None
         self.system_monitor = SystemMonitor()
         logger.info("MLXModelManager initialized")
     
@@ -99,10 +97,8 @@ class MLXModelManager:
             # Get memory usage
             memory_usage = self._estimate_model_memory(model)
             
-            # Initialize thinking manager
-            self.thinking_manager = ThinkingManager(tokenizer, model_metadata)
-            supports_thinking = self.thinking_manager.supports_thinking
-            thinking_capability = self.thinking_manager.capability.value
+            # Detect thinking support directly
+            supports_thinking, thinking_capability = self._detect_thinking_support(tokenizer)
             
             # Create model info
             self.model_info = ModelInfo(
@@ -197,9 +193,31 @@ class MLXModelManager:
         """Get the loaded model info."""
         return self.model_info
     
-    def get_thinking_manager(self) -> Optional[ThinkingManager]:
-        """Get the thinking manager for the loaded model."""
-        return self.thinking_manager
+    def _detect_thinking_support(self, tokenizer: Any) -> Tuple[bool, str]:
+        """
+        Detect if the tokenizer/model supports thinking.
+        
+        Returns:
+            Tuple of (supports_thinking, capability_level)
+        """
+        # Check if tokenizer has thinking support (mlx_lm TokenizerWrapper)
+        if hasattr(tokenizer, 'has_thinking') and tokenizer.has_thinking:
+            return True, "native"
+        
+        # Check for thinking tokens in vocabulary
+        if hasattr(tokenizer, 'get_vocab'):
+            vocab = tokenizer.get_vocab()
+            thinking_patterns = [
+                ("<think>", "</think>"),
+                ("<thinking>", "</thinking>"),
+                ("<|thinking|>", "<|/thinking|>"),
+            ]
+            
+            for start, end in thinking_patterns:
+                if start in vocab and end in vocab:
+                    return True, "native"
+        
+        return False, "none"
     
     def get_model_status(self) -> Dict[str, Any]:
         """
@@ -242,15 +260,7 @@ class MLXModelManager:
         if not self.model_info:
             raise ValueError("No model loaded")
         
-        # Use thinking manager if available
-        if self.thinking_manager:
-            return self.thinking_manager.apply_chat_template(
-                messages,
-                enable_thinking=enable_thinking,
-                add_generation_prompt=add_generation_prompt
-            )
-        
-        # Fallback to standard tokenizer chat template
+        # Use tokenizer's apply_chat_template directly
         tokenizer = self.model_info.tokenizer
         if hasattr(tokenizer, "apply_chat_template"):
             try:
@@ -322,7 +332,6 @@ class MLXModelManager:
         try:
             # Clear model and tokenizer
             self.model_info = None
-            self.thinking_manager = None
             
             # Force garbage collection
             import gc

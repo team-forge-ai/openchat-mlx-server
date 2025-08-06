@@ -158,10 +158,9 @@ class MLXServer:
         # Model is already loaded in main.py before server starts
         if self.model_manager.model_info:
             logger.info("Model is ready for inference")
-            # Connect generation engine to model's thinking manager
-            thinking_manager = self.model_manager.get_thinking_manager()
-            self.generation_engine.set_thinking_manager(thinking_manager)
-            logger.info(f"Thinking manager connected: {thinking_manager.capability.value if thinking_manager else 'none'}")
+            # Set up thinking extraction with the tokenizer
+            self.generation_engine.set_thinking_extractor(self.model_manager.model_info.tokenizer)
+            logger.info(f"Thinking support: {self.model_manager.model_info.thinking_capability}")
     
     async def _shutdown(self):
         """Server shutdown tasks."""
@@ -338,7 +337,7 @@ class MLXServer:
                 stream=True,
                 seed=request.seed,
                 enable_thinking=enable_thinking,
-                parse_thinking=request.include_reasoning and model_info.supports_thinking
+                include_reasoning=request.include_reasoning
             ):
                 # Handle streaming result with potential reasoning events
                 if isinstance(result, tuple) and len(result) == 2:

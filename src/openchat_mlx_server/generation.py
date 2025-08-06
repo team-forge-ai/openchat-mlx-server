@@ -1,45 +1,139 @@
 """
-Unified generation engine for MLX inference with thinking support.
+Simplified generation engine for MLX inference.
+
+This module provides a thin wrapper around mlx_lm's generation functions,
+with support for thinking/reasoning extraction when available.
 """
 
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional, Union, Iterator, AsyncIterator, Tuple
-import time
+import re
 
 import mlx.core as mx
-from mlx_lm import generate as mlx_generate
-from mlx_lm.generate import stream_generate, generate_step
-from mlx_lm.sample_utils import make_sampler, make_logits_processors
+from mlx_lm import generate, stream_generate
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from .api_models import ChatMessage, ReasoningItem
+from .api_models import ReasoningItem
 from .utils import generate_id
-from .thinking_manager import ThinkingManager, ThinkingResult, ReasoningEvent
 
 logger = logging.getLogger(__name__)
 
 
+class ThinkingExtractor:
+    """Simple extractor for thinking content from generated text."""
+    
+    def __init__(self, tokenizer: Any):
+        """
+        Initialize the thinking extractor.
+        
+        Args:
+            tokenizer: The tokenizer (already wrapped by mlx_lm if needed)
+        """
+        self.tokenizer = tokenizer
+        
+        # Check if tokenizer has thinking support
+        self.has_thinking = False
+        self.think_start = None
+        self.think_end = None
+        
+        if isinstance(tokenizer, TokenizerWrapper):
+            self.has_thinking = tokenizer.has_thinking
+            self.think_start = tokenizer.think_start
+            self.think_end = tokenizer.think_end
+        else:
+            # Fallback: check for common thinking tokens
+            self._detect_thinking_tokens()
+    
+    def _detect_thinking_tokens(self):
+        """Detect thinking tokens in the tokenizer vocabulary."""
+        if not hasattr(self.tokenizer, 'get_vocab'):
+            return
+            
+        vocab = self.tokenizer.get_vocab()
+        
+        # Common thinking token patterns
+        thinking_patterns = [
+            ("<think>", "</think>"),
+            ("<thinking>", "</thinking>"),
+            ("<|thinking|>", "<|/thinking|>"),
+        ]
+        
+        for start, end in thinking_patterns:
+            if start in vocab and end in vocab:
+                self.has_thinking = True
+                self.think_start = start
+                self.think_end = end
+                logger.debug(f"Detected thinking tokens: {start}, {end}")
+                break
+    
+    def extract(self, text: str) -> Tuple[str, Optional[str]]:
+        """
+        Extract thinking content from generated text.
+        
+        Args:
+            text: The generated text
+            
+        Returns:
+            Tuple of (content_without_thinking, thinking_content)
+        """
+        # Always check for common thinking patterns
+        common_patterns = [
+            (r"<think>(.*?)</think>", "<think>", "</think>"),
+            (r"<thinking>(.*?)</thinking>", "<thinking>", "</thinking>"),
+            (r"<\|thinking\|>(.*?)<\|/thinking\|>", "<|thinking|>", "<|/thinking|>"),
+        ]
+        
+        # Use detected patterns if available, otherwise check all common patterns
+        if self.has_thinking and self.think_start and self.think_end:
+            # Add the detected pattern to the list
+            pattern = re.escape(self.think_start) + r"(.*?)" + re.escape(self.think_end)
+            common_patterns.insert(0, (pattern, self.think_start, self.think_end))
+        
+        for pattern, start, end in common_patterns:
+            if start in text:
+                # Check for complete thinking blocks
+                matches = re.findall(pattern, text, re.DOTALL)
+                if matches:
+                    thinking_content = "\n\n".join(match.strip() for match in matches)
+                    cleaned_text = re.sub(pattern, "", text, flags=re.DOTALL)
+                    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+                    return cleaned_text, thinking_content
+                
+                # Check for incomplete thinking block (no closing tag)
+                if end not in text:
+                    # Extract everything after the opening tag as thinking
+                    parts = text.split(start, 1)
+                    if len(parts) == 2:
+                        cleaned_text = parts[0].strip()
+                        thinking_content = parts[1].strip()
+                        return cleaned_text, thinking_content
+        
+        return text, None
+
+
 class GenerationEngine:
     """
-    Unified generation engine using MLX-LM with native thinking support.
+    Simplified generation engine using MLX-LM directly.
     
-    This engine handles:
-    - Text generation with MLX models
-    - Thinking/reasoning extraction
-    - Streaming responses
-    - Token counting
+    This engine provides:
+    - Direct integration with mlx_lm's generate and stream_generate
+    - Automatic thinking extraction when supported
+    - Async wrapper for compatibility
     """
     
     def __init__(self):
         """Initialize the generation engine."""
-        self.active_generations = {}
-        self._generation_lock = asyncio.Lock()
-        self.thinking_manager = None  # Set per-model
+        self.thinking_extractor = None
     
-    def set_thinking_manager(self, thinking_manager: Optional[ThinkingManager]):
-        """Set the thinking manager for the current model."""
-        self.thinking_manager = thinking_manager
+    def set_thinking_extractor(self, tokenizer: Any):
+        """
+        Set up thinking extraction for the current tokenizer.
+        
+        Args:
+            tokenizer: The tokenizer to use for extraction
+        """
+        self.thinking_extractor = ThinkingExtractor(tokenizer)
     
     def generate(
         self,
@@ -55,6 +149,7 @@ class GenerationEngine:
         seed: Optional[int] = None,
         enable_thinking: Optional[bool] = None,
         include_reasoning: bool = True,
+        # Additional sampling parameters from mlx_lm
         top_k: int = 0,
         min_p: float = 0.0,
         min_tokens_to_keep: int = 1,
@@ -62,40 +157,42 @@ class GenerationEngine:
         **kwargs
     ) -> Union[str, Iterator[str], Tuple[str, Optional[ReasoningItem]]]:
         """
-        Generate text using MLX model with thinking support.
+        Generate text using MLX model.
         
         Args:
             model: MLX model object
-            tokenizer: Tokenizer object
+            tokenizer: Tokenizer object (will be wrapped by mlx_lm if needed)
             messages: Input messages or prompt string
             max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature (0 = deterministic)
+            temperature: Sampling temperature
             top_p: Top-p (nucleus) sampling parameter
             repetition_penalty: Repetition penalty factor
             stop_sequences: List of stop sequences
             stream: Whether to stream the response
             seed: Random seed for generation
-            enable_thinking: Whether to enable thinking (None = auto)
-            include_reasoning: Whether to include reasoning in response
-            top_k: Top-k sampling parameter (0 = disabled)
-            min_p: Min-p sampling parameter (0.0 = disabled)
-            min_tokens_to_keep: Minimum tokens to keep for min-p sampling
+            enable_thinking: Whether to enable thinking (currently handled by tokenizer)
+            include_reasoning: Whether to extract and include reasoning
+            top_k: Top-k sampling parameter
+            min_p: Min-p sampling parameter
+            min_tokens_to_keep: Minimum tokens to keep for min-p
             repetition_context_size: Context size for repetition penalty
-            **kwargs: Additional MLX-LM parameters
+            **kwargs: Additional parameters passed to mlx_lm
         
         Returns:
-            Generated text, iterator of text chunks, or tuple with reasoning item
+            Generated text, iterator of text chunks, or tuple with reasoning
         """
-        # Format messages using thinking manager if available
+        # Ensure we have a thinking extractor
+        if not self.thinking_extractor:
+            self.set_thinking_extractor(tokenizer)
+        
+        # Format messages to prompt
         if isinstance(messages, list):
-            if self.thinking_manager:
-                prompt = self.thinking_manager.apply_chat_template(
-                    messages, 
-                    enable_thinking=enable_thinking,
-                    add_generation_prompt=True
-                )
-            else:
-                prompt = self._format_messages_to_prompt(messages, tokenizer)
+            # Use tokenizer's apply_chat_template (always available)
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
         else:
             prompt = messages
         
@@ -105,215 +202,74 @@ class GenerationEngine:
         if seed is not None:
             mx.random.seed(seed)
         
-        # Get generation config from thinking manager
-        if self.thinking_manager and enable_thinking:
-            gen_config = self.thinking_manager.get_generation_config(enable_thinking)
-            # Add stop tokens from config
-            if 'stop_tokens' in gen_config:
-                stop_sequences = (stop_sequences or []) + gen_config['stop_tokens']
+        # Prepare stop tokens
+        stop_tokens = []
+        if stop_sequences:
+            if isinstance(tokenizer, TokenizerWrapper):
+                # Add stop sequences as EOS tokens
+                for seq in stop_sequences:
+                    tokenizer.add_eos_token(seq)
+            else:
+                # Will be handled by mlx_lm internally
+                stop_tokens = stop_sequences
         
         try:
             if stream:
                 return self._generate_stream(
                     model, tokenizer, prompt,
                     max_tokens, temperature, top_p,
-                    repetition_penalty, stop_sequences,
-                    include_reasoning, 
-                    top_k=top_k,
-                    min_p=min_p,
-                    min_tokens_to_keep=min_tokens_to_keep,
-                    repetition_context_size=repetition_context_size,
+                    repetition_penalty, stop_tokens,
+                    include_reasoning,
+                    top_k, min_p, min_tokens_to_keep,
+                    repetition_context_size,
                     **kwargs
                 )
             else:
-                # Generate complete response
-                result = self._generate_complete(
-                    model, tokenizer, prompt,
-                    max_tokens, temperature, top_p,
-                    repetition_penalty, stop_sequences,
-                    top_k=top_k,
+                # Use mlx_lm's generate directly
+                from mlx_lm.sample_utils import make_sampler, make_logits_processors
+                
+                # Create sampler with all parameters
+                sampler = make_sampler(
+                    temp=temperature,
+                    top_p=top_p,
                     min_p=min_p,
                     min_tokens_to_keep=min_tokens_to_keep,
-                    repetition_context_size=repetition_context_size,
+                    top_k=top_k
+                )
+                
+                # Create logits processors for repetition penalty
+                logits_processors = None
+                if repetition_penalty and repetition_penalty != 1.0:
+                    logits_processors = make_logits_processors(
+                        repetition_penalty=repetition_penalty,
+                        repetition_context_size=repetition_context_size
+                    )
+                
+                # Generate text
+                generated_text = generate(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    verbose=False,
+                    sampler=sampler,
+                    logits_processors=logits_processors,
                     **kwargs
                 )
                 
-                # Extract reasoning if thinking manager is available
-                if self.thinking_manager and include_reasoning:
-                    thinking_result = self.thinking_manager.extract_reasoning(
-                        result, include_reasoning
-                    )
-                    
-                    if thinking_result.reasoning_content:
+                # Extract reasoning if needed
+                if include_reasoning and self.thinking_extractor:
+                    content, thinking = self.thinking_extractor.extract(generated_text)
+                    if thinking:
                         reasoning_item = ReasoningItem(
-                            id=thinking_result.reasoning_id,
-                            content=thinking_result.reasoning_content
+                            id=generate_id("reasoning"),
+                            content=thinking
                         )
-                        return thinking_result.content, reasoning_item
-                    else:
-                        return result, None
-                else:
-                    return result
-                    
-        except Exception as e:
-            logger.error(f"Generation failed: {e}", exc_info=True)
-            raise
-    
-    async def generate_async(
-        self,
-        model: Any,
-        tokenizer: Any,
-        messages: Union[str, List[Dict[str, str]]],
-        max_tokens: int = 150,
-        temperature: float = 0.7,
-        top_p: float = 1.0,
-        repetition_penalty: float = 1.0,
-        stop_sequences: Optional[List[str]] = None,
-        stream: bool = False,
-        seed: Optional[int] = None,
-        enable_thinking: Optional[bool] = None,
-        include_reasoning: bool = True,
-        **kwargs
-    ) -> AsyncIterator:
-        """
-        Async wrapper for generation.
-        
-        Yields results asynchronously for both streaming and non-streaming modes.
-        """
-        if stream:
-            # Run sync generator in thread for streaming
-            def gen():
-                return self.generate(
-                    model, tokenizer, messages,
-                    max_tokens, temperature, top_p,
-                    repetition_penalty, stop_sequences,
-                    stream=True, seed=seed,
-                    enable_thinking=enable_thinking,
-                    include_reasoning=include_reasoning,
-                    **kwargs
-                )
-            
-            generator = await asyncio.to_thread(gen)
-            for chunk in generator:
-                yield chunk
-        else:
-            # For non-streaming, run in thread and yield once
-            result = await asyncio.to_thread(
-                self.generate,
-                model, tokenizer, messages,
-                max_tokens, temperature, top_p,
-                repetition_penalty, stop_sequences,
-                stream=False, seed=seed,
-                enable_thinking=enable_thinking,
-                include_reasoning=include_reasoning,
-                **kwargs
-            )
-            yield result
-    
-    def _format_messages_to_prompt(
-        self,
-        messages: List[Dict[str, str]],
-        tokenizer: Any
-    ) -> str:
-        """
-        Fallback message formatting when no thinking manager available.
-        """
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-                logger.debug("Applied tokenizer chat template")
-                return prompt
-            except Exception as e:
-                logger.warning(f"Failed to apply chat template: {e}")
-        
-        # Manual formatting fallback
-        formatted = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            
-            if role == "system":
-                formatted.append(f"System: {content}")
-            elif role == "user":
-                formatted.append(f"User: {content}")
-            elif role == "assistant":
-                formatted.append(f"Assistant: {content}")
-            else:
-                formatted.append(f"{role}: {content}")
-        
-        prompt = "\n\n".join(formatted)
-        prompt += "\n\nAssistant:"
-        
-        logger.debug("Used fallback message formatting")
-        return prompt
-    
-    def _generate_complete(
-        self,
-        model: Any,
-        tokenizer: Any,
-        prompt: str,
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        repetition_penalty: float,
-        stop_sequences: Optional[List[str]],
-        top_k: int = 0,
-        min_p: float = 0.0,
-        min_tokens_to_keep: int = 1,
-        repetition_context_size: int = 20,
-        **kwargs
-    ) -> str:
-        """
-        Generate complete response using MLX-LM with proper sampling.
-        """
-        try:
-            # Wrap tokenizer if needed
-            if not isinstance(tokenizer, TokenizerWrapper):
-                tokenizer = TokenizerWrapper(tokenizer)
-            
-            # Add extra stop tokens to tokenizer
-            if stop_sequences:
-                for stop_seq in stop_sequences:
-                    tokenizer.add_eos_token(stop_seq)
-            
-            # Create sampler with all parameters
-            sampler = make_sampler(
-                temp=temperature,
-                top_p=top_p,
-                min_p=min_p,
-                min_tokens_to_keep=min_tokens_to_keep,
-                top_k=top_k
-            )
-            
-            # Create logits processors for repetition penalty
-            logits_processors = None
-            if repetition_penalty and repetition_penalty != 1.0:
-                logits_processors = make_logits_processors(
-                    repetition_penalty=repetition_penalty,
-                    repetition_context_size=repetition_context_size
-                )
-            
-            # Use the advanced generate function with proper sampling
-            generated_text = mlx_generate(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                verbose=False,
-                sampler=sampler,
-                logits_processors=logits_processors
-            )
-            
-            # Remove prompt from generated text if present
-            if generated_text.startswith(prompt):
-                generated_text = generated_text[len(prompt):]
-            
-            return generated_text.strip()
-            
+                        return content, reasoning_item
+                    return generated_text, None
+                
+                return generated_text
+                
         except Exception as e:
             logger.error(f"Generation failed: {e}", exc_info=True)
             raise
@@ -327,81 +283,130 @@ class GenerationEngine:
         temperature: float,
         top_p: float,
         repetition_penalty: float,
-        stop_sequences: Optional[List[str]],
-        include_reasoning: bool = True,
-        top_k: int = 0,
-        min_p: float = 0.0,
-        min_tokens_to_keep: int = 1,
-        repetition_context_size: int = 20,
+        stop_tokens: List[str],
+        include_reasoning: bool,
+        top_k: int,
+        min_p: float,
+        min_tokens_to_keep: int,
+        repetition_context_size: int,
         **kwargs
     ) -> Iterator[Tuple[Optional[str], Optional[Dict[str, Any]]]]:
         """
-        Stream generation with thinking support using MLX-LM's stream_generate.
+        Stream generation using mlx_lm's stream_generate.
         
         Yields tuples of (text_chunk, reasoning_event).
         """
-        try:
-            # Wrap tokenizer if needed
-            if not isinstance(tokenizer, TokenizerWrapper):
-                tokenizer = TokenizerWrapper(tokenizer)
-            
-            # Add extra stop tokens to tokenizer
-            if stop_sequences:
-                for stop_seq in stop_sequences:
-                    tokenizer.add_eos_token(stop_seq)
-            
-            # Create sampler with all parameters
-            sampler = make_sampler(
-                temp=temperature,
-                top_p=top_p,
-                min_p=min_p,
-                min_tokens_to_keep=min_tokens_to_keep,
-                top_k=top_k
+        from mlx_lm.sample_utils import make_sampler, make_logits_processors
+        
+        # Create sampler
+        sampler = make_sampler(
+            temp=temperature,
+            top_p=top_p,
+            min_p=min_p,
+            min_tokens_to_keep=min_tokens_to_keep,
+            top_k=top_k
+        )
+        
+        # Create logits processors
+        logits_processors = None
+        if repetition_penalty and repetition_penalty != 1.0:
+            logits_processors = make_logits_processors(
+                repetition_penalty=repetition_penalty,
+                repetition_context_size=repetition_context_size
             )
+        
+        # Track thinking state for streaming
+        in_thinking = False
+        thinking_buffer = []
+        session_id = generate_id("stream")
+        
+        # Stream using mlx_lm
+        for response in stream_generate(
+            model=model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            **kwargs
+        ):
+            text_chunk = response.text
             
-            # Create logits processors for repetition penalty
-            logits_processors = None
-            if repetition_penalty and repetition_penalty != 1.0:
-                logits_processors = make_logits_processors(
-                    repetition_penalty=repetition_penalty,
-                    repetition_context_size=repetition_context_size
+            # Simple thinking detection for streaming
+            if include_reasoning and self.thinking_extractor and self.thinking_extractor.has_thinking:
+                # Check for thinking markers
+                if self.thinking_extractor.think_start in text_chunk:
+                    in_thinking = True
+                    # Send thinking start event
+                    yield None, {
+                        "type": "start",
+                        "id": session_id,
+                        "content": None,
+                        "partial": False
+                    }
+                    # Remove thinking start marker from output
+                    text_chunk = text_chunk.replace(self.thinking_extractor.think_start, "")
+                
+                if in_thinking:
+                    if self.thinking_extractor.think_end in text_chunk:
+                        # End of thinking
+                        parts = text_chunk.split(self.thinking_extractor.think_end)
+                        thinking_buffer.append(parts[0])
+                        
+                        # Send thinking complete event
+                        yield None, {
+                            "type": "complete",
+                            "id": session_id,
+                            "content": "".join(thinking_buffer),
+                            "partial": False
+                        }
+                        
+                        # Reset state
+                        in_thinking = False
+                        thinking_buffer = []
+                        
+                        # Continue with remaining text
+                        text_chunk = parts[1] if len(parts) > 1 else ""
+                    else:
+                        # Still in thinking, buffer the content
+                        thinking_buffer.append(text_chunk)
+                        continue  # Don't yield thinking content as regular text
+            
+            # Yield the text chunk
+            if text_chunk:
+                yield text_chunk, None
+    
+    async def generate_async(
+        self,
+        model: Any,
+        tokenizer: Any,
+        messages: Union[str, List[Dict[str, str]]],
+        **kwargs
+    ) -> AsyncIterator:
+        """
+        Async wrapper for generation.
+        
+        Yields results asynchronously for both streaming and non-streaming modes.
+        """
+        stream = kwargs.get('stream', False)
+        
+        if stream:
+            # Run sync generator in thread for streaming
+            def gen():
+                return self.generate(
+                    model, tokenizer, messages, **kwargs
                 )
             
-            # Use MLX-LM's stream_generate for proper streaming
-            session_id = generate_id("stream") if self.thinking_manager else None
-            accumulated_text = ""
-            
-            for response in stream_generate(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                sampler=sampler,
-                logits_processors=logits_processors
-            ):
-                text_chunk = response.text
-                
-                # Process through thinking manager if available
-                if self.thinking_manager and include_reasoning:
-                    accumulated_text += text_chunk
-                    processed_text, event = self.thinking_manager.process_streaming_chunk(
-                        text_chunk, session_id
-                    )
-                    
-                    if processed_text or event:
-                        yield processed_text, event
-                else:
-                    # Direct streaming without thinking processing
-                    if text_chunk:
-                        yield text_chunk, None
-            
-            # Reset streaming state if using thinking manager
-            if self.thinking_manager and session_id:
-                self.thinking_manager.reset_streaming_state(session_id)
-                
-        except Exception as e:
-            logger.error(f"Stream generation failed: {e}", exc_info=True)
-            raise
+            generator = await asyncio.to_thread(gen)
+            for chunk in generator:
+                yield chunk
+        else:
+            # For non-streaming, run in thread and yield once
+            result = await asyncio.to_thread(
+                self.generate,
+                model, tokenizer, messages, **kwargs
+            )
+            yield result
     
     def count_tokens(self, tokenizer: Any, text: str) -> int:
         """
@@ -421,19 +426,3 @@ class GenerationEngine:
             # Rough estimate: 1 token ≈ 4 characters
             return len(text) // 4
     
-    def cancel_generation(self, generation_id: str) -> bool:
-        """
-        Cancel an active generation.
-        
-        Args:
-            generation_id: ID of generation to cancel
-            
-        Returns:
-            True if cancelled, False if not found
-        """
-        if generation_id in self.active_generations:
-            # In a real implementation, this would signal the generation to stop
-            del self.active_generations[generation_id]
-            logger.info(f"Cancelled generation: {generation_id}")
-            return True
-        return False
