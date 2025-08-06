@@ -5,7 +5,8 @@ import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
 from typing import List, Dict
 
-from openchat_mlx_server.generation import GenerationEngine, ThinkingExtractor
+from openchat_mlx_server.generation import GenerationEngine
+from openchat_mlx_server.thinking import ThinkingExtractor
 
 
 @pytest.fixture

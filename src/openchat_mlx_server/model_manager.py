@@ -19,6 +19,7 @@ from .utils import (
     format_bytes,
     SystemMonitor
 )
+from .thinking import detect_thinking_support
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,8 @@ class MLXModelManager:
             # Get memory usage
             memory_usage = self._estimate_model_memory(model)
             
-            # Detect thinking support directly
-            supports_thinking, thinking_capability = self._detect_thinking_support(tokenizer)
+            # Detect thinking support
+            supports_thinking, thinking_capability = detect_thinking_support(tokenizer)
             
             # Create model info
             self.model_info = ModelInfo(
@@ -193,31 +194,7 @@ class MLXModelManager:
         """Get the loaded model info."""
         return self.model_info
     
-    def _detect_thinking_support(self, tokenizer: Any) -> Tuple[bool, str]:
-        """
-        Detect if the tokenizer/model supports thinking.
-        
-        Returns:
-            Tuple of (supports_thinking, capability_level)
-        """
-        # Check if tokenizer has thinking support (mlx_lm TokenizerWrapper)
-        if hasattr(tokenizer, 'has_thinking') and tokenizer.has_thinking:
-            return True, "native"
-        
-        # Check for thinking tokens in vocabulary
-        if hasattr(tokenizer, 'get_vocab'):
-            vocab = tokenizer.get_vocab()
-            thinking_patterns = [
-                ("<think>", "</think>"),
-                ("<thinking>", "</thinking>"),
-                ("<|thinking|>", "<|/thinking|>"),
-            ]
-            
-            for start, end in thinking_patterns:
-                if start in vocab and end in vocab:
-                    return True, "native"
-        
-        return False, "none"
+
     
     def get_model_status(self) -> Dict[str, Any]:
         """
