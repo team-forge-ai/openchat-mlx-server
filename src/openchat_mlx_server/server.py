@@ -58,7 +58,7 @@ class MLXServer:
         """
         self.config = config
         self.model_manager = MLXModelManager()
-        self.generation_engine = GenerationEngine()
+        self.generation_engine = None  # Will be initialized during startup
         self.system_monitor = SystemMonitor()
         self.process_manager = ProcessManager()
         
@@ -158,9 +158,22 @@ class MLXServer:
         # Model is already loaded in main.py before server starts
         if self.model_manager.model_info:
             logger.info("Model is ready for inference")
-            # Set up thinking extraction with the tokenizer
-            self.generation_engine.set_thinking_extractor(self.model_manager.model_info.tokenizer)
+            # Initialize the generation engine with the loaded model and tokenizer
+            self.generation_engine = GenerationEngine(
+                model=self.model_manager.model_info.model,
+                tokenizer=self.model_manager.model_info.tokenizer
+            )
             logger.info(f"Thinking support: {self.model_manager.model_info.thinking_capability}")
+        else:
+            raise RuntimeError("No model loaded - cannot start server without a model")
+    
+    def _ensure_generation_engine(self):
+        """Ensure generation engine is available."""
+        if self.generation_engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Generation engine not initialized - server may still be starting up"
+            )
     
     async def _shutdown(self):
         """Server shutdown tasks."""
@@ -199,6 +212,9 @@ class MLXServer:
         request_id = generate_id("chatcmpl")
         
         try:
+            # Ensure generation engine is ready
+            self._ensure_generation_engine()
+            
             # Get the loaded model
             model_info = self.model_manager.get_model()
             if not model_info:
@@ -231,8 +247,6 @@ class MLXServer:
                 # Generate complete response
                 # generate_async always returns an async generator, even for non-streaming
                 async_gen = self.generation_engine.generate_async(
-                    model_info.model,
-                    model_info.tokenizer,
                     messages,
                     max_tokens=request.max_tokens or self.config.default_max_tokens,
                     temperature=request.temperature,
@@ -260,7 +274,6 @@ class MLXServer:
                     # Count reasoning tokens if present
                     if reasoning_item and reasoning_item.content:
                         reasoning_tokens = self.generation_engine.count_tokens(
-                            model_info.tokenizer,
                             reasoning_item.content
                         )
                 else:
@@ -272,11 +285,9 @@ class MLXServer:
                     enable_thinking=enable_thinking
                 )
                 prompt_tokens = self.generation_engine.count_tokens(
-                    model_info.tokenizer,
                     prompt_text
                 )
                 completion_tokens = self.generation_engine.count_tokens(
-                    model_info.tokenizer,
                     generated_text
                 )
                 
@@ -318,6 +329,9 @@ class MLXServer:
             SSE formatted response chunks
         """
         try:
+            # Ensure generation engine is ready
+            self._ensure_generation_engine()
+            
             # Send initial chunk with role
             initial_chunk = create_stream_response_chunk(
                 request_id=request_id,
@@ -328,8 +342,6 @@ class MLXServer:
             
             # Generate and stream response
             async for result in self.generation_engine.generate_async(
-                model_info.model,
-                model_info.tokenizer,
                 messages,
                 max_tokens=request.max_tokens or self.config.default_max_tokens,
                 temperature=request.temperature,
@@ -402,6 +414,9 @@ class MLXServer:
         request: CompletionRequest
     ) -> CompletionResponse:
         """Handle completion request (for backwards compatibility)."""
+        # Ensure generation engine is ready
+        self._ensure_generation_engine()
+        
         # Convert to chat completion format
         messages = [{"role": "user", "content": request.prompt if isinstance(request.prompt, str) else request.prompt[0]}]
         
@@ -415,8 +430,6 @@ class MLXServer:
         
         # Generate response
         generated_text = await self.generation_engine.generate_async(
-            model_info.model,
-            model_info.tokenizer,
             request.prompt if isinstance(request.prompt, str) else request.prompt[0],
             max_tokens=request.max_tokens or self.config.default_max_tokens,
             temperature=request.temperature,

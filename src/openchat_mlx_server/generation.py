@@ -32,26 +32,105 @@ class GenerationEngine:
     - Thread-safe GPU access to prevent Metal command buffer conflicts
     """
     
-    def __init__(self):
-        """Initialize the generation engine."""
-        self.thinking_extractor = None
-        # Add a lock to prevent concurrent GPU access
-        # Metal doesn't support concurrent command buffer encoding
-        self._gpu_lock = threading.Lock()
-    
-    def set_thinking_extractor(self, tokenizer: Any):
+    def __init__(self, model: Any, tokenizer: Any):
         """
-        Set up thinking extraction for the current tokenizer.
+        Initialize the generation engine.
         
         Args:
-            tokenizer: The tokenizer to use for extraction
+            model: MLX model object
+            tokenizer: Tokenizer object
         """
+        self.model = model
+        self.tokenizer = tokenizer
         self.thinking_extractor = ThinkingExtractor(tokenizer)
+        # Use an asyncio lock for asynchronous, task-safe GPU access
+        self._async_gpu_lock = asyncio.Lock()
+
+    def _prepare_prompt(
+        self,
+        messages: Union[str, List[Dict[str, str]]]
+    ) -> str:
+        """Formats the input messages into a single prompt string."""
+        if isinstance(messages, list):
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt = messages
+        logger.debug(f"Generating with prompt length: {len(prompt)} chars")
+        return prompt
+
+    def _prepare_sampler_and_processors(
+        self,
+        temperature: float,
+        top_p: float,
+        min_p: float,
+        top_k: int,
+        min_tokens_to_keep: int,
+        repetition_penalty: float,
+        repetition_context_size: int,
+        max_tokens: int
+    ) -> Tuple[Any, Optional[Any]]:
+        """Creates sampler and logits processors for generation."""
+        logger.debug(f"Generation parameters - Temperature: {temperature}, TopP: {top_p}, "
+                    f"TopK: {top_k}, MinP: {min_p}, MaxTokens: {max_tokens}")
+        
+        sampler = make_sampler(
+            temp=temperature,
+            top_p=top_p,
+            min_p=min_p,
+            min_tokens_to_keep=min_tokens_to_keep,
+            top_k=top_k
+        )
+        
+        logits_processors = None
+        if repetition_penalty and repetition_penalty != 1.0:
+            logits_processors = make_logits_processors(
+                repetition_penalty=repetition_penalty,
+                repetition_context_size=repetition_context_size
+            )
+        
+        return sampler, logits_processors
+
+    def _generate_non_stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        sampler: Any,
+        logits_processors: Any,
+        include_reasoning: bool,
+        **kwargs
+    ) -> Union[str, Tuple[str, Optional[ReasoningItem]]]:
+        """Handles non-streaming generation."""
+        # The GPU lock is managed by the calling method (e.g., generate_async)
+        generated_text = generate(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            verbose=False,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            **kwargs
+        )
+        
+        # Extract reasoning if needed
+        if include_reasoning and self.thinking_extractor:
+            content, thinking = self.thinking_extractor.extract(generated_text)
+            if thinking:
+                reasoning_item = ReasoningItem(
+                    id=generate_id("reasoning"),
+                    content=thinking
+                )
+                return content, reasoning_item
+            return generated_text, None
+        
+        return generated_text
     
     def generate(
         self,
-        model: Any,
-        tokenizer: Any,
         messages: Union[str, List[Dict[str, str]]],
         max_tokens: int = 2000,
         temperature: float = 0.6,
@@ -73,8 +152,6 @@ class GenerationEngine:
         Generate text using MLX model.
         
         Args:
-            model: MLX model object
-            tokenizer: Tokenizer object (will be wrapped by mlx_lm if needed)
             messages: Input messages or prompt string
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
@@ -94,82 +171,34 @@ class GenerationEngine:
         Returns:
             Generated text, iterator of text chunks, or tuple with reasoning
         """
-        # Ensure we have a thinking extractor
-        if not self.thinking_extractor:
-            self.set_thinking_extractor(tokenizer)
-        
-        # Format messages to prompt
-        if isinstance(messages, list):
-            # Use tokenizer's apply_chat_template (always available)
-            prompt = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-        else:
-            prompt = messages
-        
-        logger.debug(f"Generating with prompt length: {len(prompt)} chars")
+        prompt = self._prepare_prompt(messages)
         
         # Set random seed if provided
         if seed is not None:
             mx.random.seed(seed)
         
-        logger.debug(f"Generation parameters - Temperature: {temperature}, TopP: {top_p}, "
-                    f"TopK: {top_k}, MinP: {min_p}, MaxTokens: {max_tokens}")
-        
-        # Create sampler with all parameters
-        sampler = make_sampler(
-            temp=temperature,
+        sampler, logits_processors = self._prepare_sampler_and_processors(
+            temperature=temperature,
             top_p=top_p,
             min_p=min_p,
+            top_k=top_k,
             min_tokens_to_keep=min_tokens_to_keep,
-            top_k=top_k
+            repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size,
+            max_tokens=max_tokens
         )
-        
-        # Create logits processors for repetition penalty
-        logits_processors = None
-        if repetition_penalty and repetition_penalty != 1.0:
-            logits_processors = make_logits_processors(
-                repetition_penalty=repetition_penalty,
-                repetition_context_size=repetition_context_size
-            )
         
         try:
             if stream:
                 return self._generate_stream(
-                    model, tokenizer, prompt,
-                    max_tokens, sampler, logits_processors,
+                    prompt, max_tokens, sampler, logits_processors,
                     include_reasoning, **kwargs
                 )
             else:
-                # Generate complete text with GPU lock to prevent concurrent access
-                with self._gpu_lock:
-                    logger.debug("Acquired GPU lock for generation")
-                    generated_text = generate(
-                        model=model,
-                        tokenizer=tokenizer,
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        verbose=False,
-                        sampler=sampler,
-                        logits_processors=logits_processors,
-                        **kwargs
-                    )
-                    logger.debug("Released GPU lock after generation")
-                
-                # Extract reasoning if needed (this doesn't need GPU lock)
-                if include_reasoning and self.thinking_extractor:
-                    content, thinking = self.thinking_extractor.extract(generated_text)
-                    if thinking:
-                        reasoning_item = ReasoningItem(
-                            id=generate_id("reasoning"),
-                            content=thinking
-                        )
-                        return content, reasoning_item
-                    return generated_text, None
-                
-                return generated_text
+                return self._generate_non_stream(
+                    prompt, max_tokens, sampler, logits_processors,
+                    include_reasoning, **kwargs
+                )
                 
         except Exception as e:
             logger.error(f"Generation failed: {e}", exc_info=True)
@@ -177,8 +206,6 @@ class GenerationEngine:
     
     def _generate_stream(
         self,
-        model: Any,
-        tokenizer: Any,
         prompt: str,
         max_tokens: int,
         sampler: Any,
@@ -193,92 +220,88 @@ class GenerationEngine:
         """
         # Create streaming processor if reasoning is enabled
         processor = None
+        
         if include_reasoning and self.thinking_extractor:
             processor = StreamingThinkingProcessor(self.thinking_extractor)
             processor.session_id = generate_id("stream")
         
-        # Stream using mlx_lm with GPU lock
-        # We need to hold the lock for the entire streaming session
-        with self._gpu_lock:
-            logger.debug("Acquired GPU lock for streaming generation")
-            try:
-                for response in stream_generate(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    sampler=sampler,
-                    logits_processors=logits_processors,
-                    **kwargs
-                ):
-                    text_chunk = response.text
-                    
-                    # Process through thinking processor if available
-                    if processor:
-                        text_chunk, reasoning_event = processor.process_chunk(text_chunk)
-                        if text_chunk or reasoning_event:
-                            yield text_chunk, reasoning_event
-                    else:
-                        # Direct streaming without thinking processing
-                        if text_chunk:
-                            yield text_chunk, None
-            finally:
-                logger.debug("Released GPU lock after streaming generation")
+        try:
+            for response in stream_generate(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                **kwargs
+            ):
+                text_chunk = response.text
+                
+                # Process through thinking processor if available
+                if processor:
+                    text_chunk, reasoning_event = processor.process_chunk(text_chunk)
+                    if text_chunk or reasoning_event:
+                        yield text_chunk, reasoning_event
+                else:
+                    # Direct streaming without thinking processing
+                    if text_chunk:
+                        yield text_chunk, None
+        finally:
+            # The lock is released when generate_async completes
+            pass
     
     async def generate_async(
         self,
-        model: Any,
-        tokenizer: Any,
         messages: Union[str, List[Dict[str, str]]],
         **kwargs
     ) -> AsyncIterator:
         """
-        Async wrapper for generation.
+        Async wrapper for generation, ensuring thread-safe GPU access.
         
         Yields results asynchronously for both streaming and non-streaming modes.
         """
-        stream = kwargs.get('stream', False)
-        
-        if stream:
-            # Get the synchronous generator
-            sync_generator = self.generate(
-                model, tokenizer, messages, **kwargs
-            )
+        async with self._async_gpu_lock:
+            stream = kwargs.get('stream', False)
+            
+            if stream:
+                # Get the synchronous generator
+                sync_generator = self.generate(
+                    messages, **kwargs
+                )
 
-            # Helper to safely fetch next item without propagating StopIteration
-            def _next_item(gen):
-                try:
-                    return True, next(gen)
-                except StopIteration:
-                    return False, None
+                # Helper to safely fetch next item without propagating StopIteration
+                def _next_item(gen):
+                    try:
+                        return True, next(gen)
+                    except StopIteration:
+                        return False, None
 
-            # Iterate over the generator without blocking the event loop
-            while True:
-                has_next, chunk = await asyncio.to_thread(_next_item, sync_generator)
-                if not has_next:
-                    break
-                yield chunk
-        else:
-            # For non-streaming, run in thread and yield once
-            result = await asyncio.to_thread(
-                self.generate,
-                model, tokenizer, messages, **kwargs
-            )
-            yield result
+                # Iterate over the generator without blocking the event loop
+                while True:
+                    has_next, chunk = await asyncio.to_thread(_next_item, sync_generator)
+                    if not has_next:
+                        break
+                    yield chunk
+            else:
+                # For non-streaming, run in thread and yield once
+                result = await asyncio.to_thread(
+                    self.generate,
+                    messages, **kwargs
+                )
+                yield result
     
-    def count_tokens(self, tokenizer: Any, text: str) -> int:
+    def count_tokens(self, text: str) -> int:
         """
         Count tokens in text.
         
         Args:
-            tokenizer: Tokenizer object
             text: Text to count tokens for
             
         Returns:
             Number of tokens
         """
         try:
-            return len(tokenizer.encode(text))
+            return len(self.tokenizer.encode(text))
         except Exception as e:
             logger.warning(f"Failed to count tokens: {e}")
             # Rough estimate: 1 token ≈ 4 characters
