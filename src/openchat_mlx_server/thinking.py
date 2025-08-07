@@ -235,11 +235,13 @@ class StreamingThinkingProcessor:
             # Started thinking
             self.in_thinking = True
             self.thinking_buffer = [thinking_content] if thinking_content else []
+            
+            # Send start event with initial content if available
             reasoning_event = {
                 "type": "start",
                 "id": self.session_id,
-                "content": None,
-                "partial": False
+                "content": thinking_content if thinking_content else None,
+                "partial": True
             }
         elif self.in_thinking and not still_thinking:
             # Finished thinking
@@ -257,9 +259,16 @@ class StreamingThinkingProcessor:
             self.in_thinking = False
             self.thinking_buffer = []
         elif self.in_thinking:
-            # Still in thinking, accumulate
+            # Still in thinking, stream partial content
             if thinking_content:
                 self.thinking_buffer.append(thinking_content)
+                # Send partial thinking content as it arrives
+                reasoning_event = {
+                    "type": "partial",
+                    "id": self.session_id,
+                    "content": thinking_content,
+                    "partial": True
+                }
         
         return output_text, reasoning_event
     

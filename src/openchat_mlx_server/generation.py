@@ -7,6 +7,7 @@ with support for thinking/reasoning extraction when available.
 
 import asyncio
 import logging
+import threading
 from typing import List, Dict, Any, Optional, Union, Iterator, AsyncIterator, Tuple
 
 import mlx.core as mx
@@ -28,11 +29,15 @@ class GenerationEngine:
     - Direct integration with mlx_lm's generate and stream_generate
     - Automatic thinking extraction when supported
     - Async wrapper for compatibility
+    - Thread-safe GPU access to prevent Metal command buffer conflicts
     """
     
     def __init__(self):
         """Initialize the generation engine."""
         self.thinking_extractor = None
+        # Add a lock to prevent concurrent GPU access
+        # Metal doesn't support concurrent command buffer encoding
+        self._gpu_lock = threading.Lock()
     
     def set_thinking_extractor(self, tokenizer: Any):
         """
@@ -138,19 +143,22 @@ class GenerationEngine:
                     include_reasoning, **kwargs
                 )
             else:
-                # Generate complete text
-                generated_text = generate(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    verbose=False,
-                    sampler=sampler,
-                    logits_processors=logits_processors,
-                    **kwargs
-                )
+                # Generate complete text with GPU lock to prevent concurrent access
+                with self._gpu_lock:
+                    logger.debug("Acquired GPU lock for generation")
+                    generated_text = generate(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        verbose=False,
+                        sampler=sampler,
+                        logits_processors=logits_processors,
+                        **kwargs
+                    )
+                    logger.debug("Released GPU lock after generation")
                 
-                # Extract reasoning if needed
+                # Extract reasoning if needed (this doesn't need GPU lock)
                 if include_reasoning and self.thinking_extractor:
                     content, thinking = self.thinking_extractor.extract(generated_text)
                     if thinking:
@@ -189,27 +197,33 @@ class GenerationEngine:
             processor = StreamingThinkingProcessor(self.thinking_extractor)
             processor.session_id = generate_id("stream")
         
-        # Stream using mlx_lm
-        for response in stream_generate(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            **kwargs
-        ):
-            text_chunk = response.text
-            
-            # Process through thinking processor if available
-            if processor:
-                text_chunk, reasoning_event = processor.process_chunk(text_chunk)
-                if text_chunk or reasoning_event:
-                    yield text_chunk, reasoning_event
-            else:
-                # Direct streaming without thinking processing
-                if text_chunk:
-                    yield text_chunk, None
+        # Stream using mlx_lm with GPU lock
+        # We need to hold the lock for the entire streaming session
+        with self._gpu_lock:
+            logger.debug("Acquired GPU lock for streaming generation")
+            try:
+                for response in stream_generate(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    sampler=sampler,
+                    logits_processors=logits_processors,
+                    **kwargs
+                ):
+                    text_chunk = response.text
+                    
+                    # Process through thinking processor if available
+                    if processor:
+                        text_chunk, reasoning_event = processor.process_chunk(text_chunk)
+                        if text_chunk or reasoning_event:
+                            yield text_chunk, reasoning_event
+                    else:
+                        # Direct streaming without thinking processing
+                        if text_chunk:
+                            yield text_chunk, None
+            finally:
+                logger.debug("Released GPU lock after streaming generation")
     
     async def generate_async(
         self,
@@ -226,14 +240,23 @@ class GenerationEngine:
         stream = kwargs.get('stream', False)
         
         if stream:
-            # Run sync generator in thread for streaming
-            def gen():
-                return self.generate(
-                    model, tokenizer, messages, **kwargs
-                )
-            
-            generator = await asyncio.to_thread(gen)
-            for chunk in generator:
+            # Get the synchronous generator
+            sync_generator = self.generate(
+                model, tokenizer, messages, **kwargs
+            )
+
+            # Helper to safely fetch next item without propagating StopIteration
+            def _next_item(gen):
+                try:
+                    return True, next(gen)
+                except StopIteration:
+                    return False, None
+
+            # Iterate over the generator without blocking the event loop
+            while True:
+                has_next, chunk = await asyncio.to_thread(_next_item, sync_generator)
+                if not has_next:
+                    break
                 yield chunk
         else:
             # For non-streaming, run in thread and yield once

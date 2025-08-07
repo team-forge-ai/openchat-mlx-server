@@ -8,8 +8,8 @@ PYTHON := $(VENV_DIR)/bin/python
 PIP := $(PYTHON) -m pip
 PORT ?= 8000
 HOST ?= 127.0.0.1
-MODEL ?= ./models/Qwen3-0.6B-MLX-4bit
-MAX_TOKENS ?= 32000
+MODEL ?= ./models/Qwen3-32B-MLX-4bit
+MAX_TOKENS ?= 2000
 
 # Helper to check if venv exists
 define check_venv
