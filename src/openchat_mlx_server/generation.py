@@ -237,8 +237,6 @@ class GenerationEngine:
             **kwargs
         ):
             text_chunk = response.text
-
-            logger.debug(f"[STREAM] {repr(text_chunk)}")
             
             # Process through thinking processor if available
             if processor:
