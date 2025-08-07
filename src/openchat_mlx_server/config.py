@@ -23,8 +23,8 @@ class ServerConfig:
     
     # Generation defaults
     default_max_tokens: int = 2000
-    default_temperature: float = 0.7
-    default_top_p: float = 0.8  # Updated for non-thinking mode
+    default_temperature: float = 0.6
+    default_top_p: float = 0.95
     default_top_k: int = 20  # Updated for both modes
     default_min_p: float = 0.0
     default_repetition_penalty: float = 1.0

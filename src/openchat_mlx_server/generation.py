@@ -49,8 +49,8 @@ class GenerationEngine:
         tokenizer: Any,
         messages: Union[str, List[Dict[str, str]]],
         max_tokens: int = 2000,
-        temperature: float = 0.7,
-        top_p: float = 0.8,  # Updated default for non-thinking mode
+        temperature: float = 0.6,
+        top_p: float = 0.95,
         repetition_penalty: float = 1.0,
         stop_sequences: Optional[List[str]] = None,
         stream: bool = False,
@@ -58,7 +58,7 @@ class GenerationEngine:
         enable_thinking: Optional[bool] = None,
         include_reasoning: bool = True,
         # Additional sampling parameters from mlx_lm
-        top_k: int = 20,  # Updated default
+        top_k: int = 20,
         min_p: float = 0.0,
         min_tokens_to_keep: int = 1,
         repetition_context_size: int = 20,
@@ -78,7 +78,7 @@ class GenerationEngine:
             stop_sequences: List of stop sequences
             stream: Whether to stream the response
             seed: Random seed for generation
-            enable_thinking: Whether to enable thinking (currently handled by tokenizer)
+            enable_thinking: Whether to enable thinking (currently unused)
             include_reasoning: Whether to extract and include reasoning
             top_k: Top-k sampling parameter
             min_p: Min-p sampling parameter
@@ -110,53 +110,16 @@ class GenerationEngine:
         if seed is not None:
             mx.random.seed(seed)
         
-        # Apply Qwen3 recommended parameters based on thinking mode
-        # Default to thinking mode for Qwen3 models (enable_thinking=None -> True)
-        actual_enable_thinking = enable_thinking
-        if actual_enable_thinking is None:
-            # Check for explicit control tags that override the default
-            if isinstance(messages, list):
-                message_text = " ".join([msg.get("content", "") for msg in messages])
-                if "/no_think" in message_text:
-                    actual_enable_thinking = False
-                else:
-                    actual_enable_thinking = True  # Default to thinking mode for capable models
-            else:
-                actual_enable_thinking = True  # Default to thinking mode
-        
-        # Apply mode-specific parameter defaults if not explicitly overridden
-        final_temperature = temperature
-        final_top_p = top_p
-        final_top_k = top_k
-        final_min_p = min_p
-        
-        # Only apply defaults if values appear to be defaults (not explicitly set by user)
-        if actual_enable_thinking:
-            # Thinking mode: Temperature=0.6, TopP=0.95, TopK=20, MinP=0
-            if temperature == 0.7:  # Default temperature, apply thinking recommendation
-                final_temperature = 0.6
-            if top_p in [0.8, 1.0]:  # Default top_p values, apply thinking recommendation  
-                final_top_p = 0.95
-            if top_k in [0, 20]:  # Default top_k values, apply thinking recommendation
-                final_top_k = 20
-            # min_p=0.0 is already correct for thinking mode
-        else:
-            # Non-thinking mode: Temperature=0.7, TopP=0.8, TopK=20, MinP=0
-            # For non-thinking mode, the current defaults are already correct:
-            # temperature=0.7, top_p=0.8, top_k=20, min_p=0.0
-            pass  # No overrides needed for non-thinking mode with new defaults
-        
-        logger.debug(f"Generation parameters - Thinking: {actual_enable_thinking}, "
-                    f"Temperature: {final_temperature}, TopP: {final_top_p}, "
-                    f"TopK: {final_top_k}, MinP: {final_min_p}, MaxTokens: {max_tokens}")
+        logger.debug(f"Generation parameters - Temperature: {temperature}, TopP: {top_p}, "
+                    f"TopK: {top_k}, MinP: {min_p}, MaxTokens: {max_tokens}")
         
         # Create sampler with all parameters
         sampler = make_sampler(
-            temp=final_temperature,
-            top_p=final_top_p,
-            min_p=final_min_p,
+            temp=temperature,
+            top_p=top_p,
+            min_p=min_p,
             min_tokens_to_keep=min_tokens_to_keep,
-            top_k=final_top_k
+            top_k=top_k
         )
         
         # Create logits processors for repetition penalty

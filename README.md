@@ -205,7 +205,7 @@ Create a `config.json` file:
   "model_path": "/path/to/model",
   "adapter_path": null,
   "default_max_tokens": 150,
-  "default_temperature": 0.7,
+  "default_temperature": 0.6,
   "logs_dir": "./logs",
   "cors_enabled": true,
   "cors_origins": ["*"]
@@ -411,20 +411,24 @@ curl http://localhost:8000/health
 ### Common Issues
 
 1. **Module import errors**
+
    - **Problem:** `ModuleNotFoundError: No module named 'openchat_mlx_server'`
    - **Solution:** Install the package in editable mode: `pip install -e .`
 
 2. **Model fails to load**
+
    - Ensure model is in MLX format (safetensors)
    - Check file permissions
    - Verify sufficient memory
    - Model path must be provided at startup
 
 3. **Import errors from mlx_lm**
+
    - **Problem:** `ImportError: cannot import name 'generate_step' from 'mlx_lm.utils'`
    - **Solution:** Update to latest mlx-lm version or check API compatibility
 
 4. **Slow inference**
+
    - Check GPU utilization: `/v1/mlx/status`
    - Reduce `max_tokens` parameter
    - Use smaller models (e.g., 0.5B or 0.6B models)

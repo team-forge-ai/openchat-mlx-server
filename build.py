@@ -313,7 +313,8 @@ For issues and documentation, visit: https://github.com/team-forge-ai/openchat-m
         "port": 8000,
         "log_level": "INFO",
         "default_max_tokens": 150,
-        "default_temperature": 0.7,
+        "default_temperature": 0.6,
+        "default_top_p": 0.95,
         "max_loaded_models": 1
     }
     

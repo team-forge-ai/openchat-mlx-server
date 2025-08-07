@@ -93,13 +93,13 @@ Examples:
         "--temperature",
         type=float,
         default=None,
-        help="Default temperature for generation (default: 0.7)"
+        help="Default temperature for generation (default: 0.6)"
     )
     parser.add_argument(
         "--top-p",
         type=float,
         default=None,
-        help="Default top-p for generation (default: 1.0)"
+        help="Default top-p for generation (default: 0.95)"
     )
     
     # Paths
