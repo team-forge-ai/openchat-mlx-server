@@ -5,7 +5,7 @@
   "log_level": "INFO",
   "model_path": null,
   "adapter_path": null,
-  "default_max_tokens": 150,
+  "default_max_tokens": 2000,
   "default_temperature": 0.7,
   "default_top_p": 0.8,
   "default_top_k": 20,

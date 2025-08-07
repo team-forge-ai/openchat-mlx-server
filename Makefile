@@ -9,6 +9,7 @@ PIP := $(PYTHON) -m pip
 PORT ?= 8000
 HOST ?= 127.0.0.1
 MODEL ?= ./models/Qwen3-0.6B-MLX-4bit
+MAX_TOKENS ?= 32000
 
 # Helper to check if venv exists
 define check_venv
@@ -44,7 +45,7 @@ dev-install: venv ## Install development dependencies
 run: ## Run the server (defaults to Qwen3-0.6B-MLX-4bit model)
 	$(check_venv)
 	@echo "Starting MLX Engine Server on http://$(HOST):$(PORT) with model: $(MODEL)"
-	$(PYTHON) -m openchat_mlx_server.main $(MODEL) --host $(HOST) --port $(PORT) --log-level DEBUG
+	$(PYTHON) -m openchat_mlx_server.main $(MODEL) --host $(HOST) --port $(PORT) --log-level DEBUG --max-tokens $(MAX_TOKENS)
 
 stop: ## Stop the server
 	$(check_venv)

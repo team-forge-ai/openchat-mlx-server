@@ -48,7 +48,7 @@ class GenerationEngine:
         model: Any,
         tokenizer: Any,
         messages: Union[str, List[Dict[str, str]]],
-        max_tokens: int = 150,
+        max_tokens: int = 2000,
         temperature: float = 0.7,
         top_p: float = 0.8,  # Updated default for non-thinking mode
         repetition_penalty: float = 1.0,
@@ -148,7 +148,7 @@ class GenerationEngine:
         
         logger.debug(f"Generation parameters - Thinking: {actual_enable_thinking}, "
                     f"Temperature: {final_temperature}, TopP: {final_top_p}, "
-                    f"TopK: {final_top_k}, MinP: {final_min_p}")
+                    f"TopK: {final_top_k}, MinP: {final_min_p}, MaxTokens: {max_tokens}")
         
         # Create sampler with all parameters
         sampler = make_sampler(
@@ -237,6 +237,8 @@ class GenerationEngine:
             **kwargs
         ):
             text_chunk = response.text
+
+            logger.debug(f"[STREAM] {repr(text_chunk)}")
             
             # Process through thinking processor if available
             if processor:

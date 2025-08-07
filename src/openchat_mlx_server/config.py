@@ -22,7 +22,7 @@ class ServerConfig:
     log_level: str = "INFO"
     
     # Generation defaults
-    default_max_tokens: int = 150
+    default_max_tokens: int = 2000
     default_temperature: float = 0.7
     default_top_p: float = 0.8  # Updated for non-thinking mode
     default_top_k: int = 20  # Updated for both modes

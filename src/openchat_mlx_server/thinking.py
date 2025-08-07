@@ -157,8 +157,8 @@ class ThinkingExtractor:
         Returns:
             Tuple of (output_text, still_in_thinking, thinking_content)
         """
-        if not self.has_thinking or not chunk:
-            return chunk, False, None
+        if not chunk:
+            return chunk, in_thinking, None
         
         output_text = chunk
         thinking_content = None
