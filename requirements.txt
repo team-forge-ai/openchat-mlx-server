@@ -11,9 +11,7 @@ pydantic>=2.11.7
 # Additional utilities
 requests>=2.32.4
 psutil>=7.0.0
-python-multipart>=0.0.20
-httpx>=0.28.1
-aiofiles>=24.1.0
+
 
 # Optional: for development
 # pytest>=7.4.0

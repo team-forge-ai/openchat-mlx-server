@@ -143,7 +143,7 @@ class MLXServer:
             """Get server status."""
             return self._get_server_status()
         
-        @app.get("/model/info")
+        @app.get("/v1/mlx/model-info")
         async def model_info():
             """Get detailed model information."""
             return self._get_detailed_model_info()
@@ -483,7 +483,7 @@ class MLXServer:
         }
     
     def _get_detailed_model_info(self) -> Dict[str, Any]:
-        """Get detailed model information for /model/info endpoint."""
+        """Get detailed model information for /v1/mlx/model-info endpoint."""
         model_status = self.model_manager.get_model_status()
         
         if model_status.get("loaded", False):

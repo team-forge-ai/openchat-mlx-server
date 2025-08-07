@@ -33,7 +33,7 @@ def test_thinking_api(base_url: str = "http://localhost:8000"):
         return
     
     # Check model capabilities
-    response = requests.get(f"{base_url}/model/info")
+    response = requests.get(f"{base_url}/v1/mlx/model-info")
     if response.status_code == 200:
         info = response.json()
         print(f"\n📦 Model: {info.get('path', 'Unknown')}")

@@ -188,7 +188,7 @@ def verify_model_info(base_url: str = "http://localhost:8000"):
     print("\nChecking Model Capabilities")
     print("-" * 40)
     
-    response = requests.get(f"{base_url}/model/info")
+    response = requests.get(f"{base_url}/v1/mlx/model-info")
     if response.status_code == 200:
         info = response.json()
         supports_thinking = info.get("supports_thinking", False)
