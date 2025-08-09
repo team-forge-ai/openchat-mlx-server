@@ -307,10 +307,9 @@ def main():
     
     # Set up logging
     log_file = None
+    # Only write to a log file if explicitly requested via --log-file
     if args.log_file:
         log_file = Path(args.log_file)
-    elif config.logs_dir:
-        log_file = config.logs_dir / "mlx_server.log"
     
     setup_logging(
         log_level=config.log_level,
