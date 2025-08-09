@@ -93,13 +93,13 @@ Examples:
         "--temperature",
         type=float,
         default=None,
-        help="Default temperature for generation (default: 0.7)"
+        help="Default temperature for generation (default: 0.6)"
     )
     parser.add_argument(
         "--top-p",
         type=float,
         default=None,
-        help="Default top-p for generation (default: 1.0)"
+        help="Default top-p for generation (default: 0.95)"
     )
     
     # Paths
@@ -307,10 +307,9 @@ def main():
     
     # Set up logging
     log_file = None
+    # Only write to a log file if explicitly requested via --log-file
     if args.log_file:
         log_file = Path(args.log_file)
-    elif config.logs_dir:
-        log_file = config.logs_dir / "mlx_server.log"
     
     setup_logging(
         log_level=config.log_level,
@@ -347,8 +346,7 @@ def main():
         print(f"Loading model from: {config.model_path}")
         
         success, message = server.model_manager.load_model(
-            model_path=config.model_path,
-            adapter_path=config.adapter_path
+            model_path=config.model_path
         )
         
         if not success:

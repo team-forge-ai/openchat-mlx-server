@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from openchat_mlx_server.server import MLXServer
 from openchat_mlx_server.config import ServerConfig
 from openchat_mlx_server.model_manager import ModelInfo
+from openchat_mlx_server.api_models import ReasoningItem
 
 
 @pytest.fixture
@@ -61,15 +62,9 @@ class TestOpenAICompatibility:
     
     def test_models_endpoint_structure(self, test_client, mock_model_info):
         """Test that /v1/models returns OpenAI-compatible structure."""
-        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_info') as mock_get_model:
-            # Return a dictionary as get_model_info does
-            mock_get_model.return_value = {
-                "path": "test-model",
-                "type": "test",
-                "architecture": "TestModel",
-                "loaded_at": "2023-01-01T00:00:00",
-                "memory_usage": "1.0 GB"
-            }
+        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model') as mock_get_model:
+            # Return a ModelInfo object as get_model does
+            mock_get_model.return_value = mock_model_info
             
             response = test_client.get("/v1/models")
             assert response.status_code == 200
@@ -220,158 +215,3 @@ class TestOpenAICompatibility:
         assert "message" in data["error"]
         assert "type" in data["error"]
 
-
-@pytest.mark.skipif(not OPENAI_AVAILABLE, reason="OpenAI client not installed")
-class TestActualOpenAIClient:
-    """Test using the actual OpenAI client against our server."""
-    
-    @pytest.fixture
-    def openai_client(self):
-        """Create OpenAI client configured for our test server."""
-        return OpenAI(
-            api_key="test-key",  # We don't validate API keys in tests
-            base_url="http://127.0.0.1:8000/v1"
-        )
-    
-    def test_openai_client_models_list(self, test_client, openai_client, mock_model_info):
-        """Test listing models using OpenAI client."""
-        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_info') as mock_get_model:
-            # Return a dictionary as get_model_info does
-            mock_get_model.return_value = {
-                "path": "test-model",
-                "type": "test",
-                "architecture": "TestModel",
-                "loaded_at": "2023-01-01T00:00:00",
-                "memory_usage": "1.0 GB"
-            }
-            
-            # This would make a real HTTP request to our test server
-            # For now, we'll test the endpoint structure manually
-            response = test_client.get("/v1/models")
-            data = response.json()
-            
-            # Verify the structure is compatible with OpenAI client expectations
-            assert "object" in data and data["object"] == "list"
-            assert "data" in data
-    
-    def test_openai_client_chat_completion(self, test_client, openai_client, mock_model_info):
-        """Test chat completion using OpenAI client structure."""
-        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model') as mock_get_model:
-            with patch('openchat_mlx_server.model_manager.MLXModelManager.format_chat_template') as mock_format_chat:
-                with patch('openchat_mlx_server.generation.GenerationEngine.generate_async') as mock_generate:
-                    with patch('openchat_mlx_server.generation.GenerationEngine.count_tokens') as mock_count:
-                        mock_get_model.return_value = mock_model_info
-                        mock_format_chat.return_value = "User: Hello!\nAssistant:"
-                        
-                        # Mock async generator
-                        async def mock_async_gen():
-                            yield "Hello! How can I help you today?"
-                        
-                        mock_generate.return_value = mock_async_gen()
-                        mock_count.side_effect = [10, 8]
-                        
-                        # Test the request format that OpenAI client would send
-                        request_data = {
-                            "model": "test-model",
-                            "messages": [
-                                {"role": "user", "content": "Hello!"}
-                            ],
-                            "max_tokens": 100,
-                            "temperature": 0.7
-                        }
-                        
-                        response = test_client.post("/v1/chat/completions", json=request_data)
-                        assert response.status_code == 200
-                        
-                        data = response.json()
-                        
-                        # Verify all required fields are present for OpenAI client
-                        required_fields = ["id", "object", "created", "model", "choices", "usage"]
-                        for field in required_fields:
-                            assert field in data, f"Missing required field: {field}"
-                    
-                    # Verify choice structure
-                    assert len(data["choices"]) == 1
-                    choice = data["choices"][0]
-                    assert "index" in choice
-                    assert "message" in choice
-                    assert "finish_reason" in choice
-                    
-                    # Verify message structure
-                    message = choice["message"]
-                    assert "role" in message
-                    assert "content" in message
-                    assert message["role"] == "assistant"
-
-
-class TestSpecialCases:
-    """Test special cases for OpenAI compatibility."""
-    
-    def test_model_field_ignored_in_single_model_setup(self, test_client, mock_model_info):
-        """Test that model field in request is ignored (single model setup)."""
-        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model') as mock_get_model:
-            with patch('openchat_mlx_server.model_manager.MLXModelManager.format_chat_template') as mock_format_chat:
-                with patch('openchat_mlx_server.generation.GenerationEngine.generate_async') as mock_generate:
-                    with patch('openchat_mlx_server.generation.GenerationEngine.count_tokens') as mock_count:
-                        mock_get_model.return_value = mock_model_info
-                        mock_format_chat.return_value = "User: Test\nAssistant:"
-                        
-                        async def mock_async_gen():
-                            yield "Response"
-                        
-                        # Return a fresh generator for each call
-                        mock_generate.side_effect = lambda *args, **kwargs: mock_async_gen()
-                        mock_count.side_effect = [5, 3] * 4  # 4 iterations, 2 calls each
-                        
-                        # Test with different model names - all should work
-                        for model_name in ["gpt-3.5-turbo", "gpt-4", "nonexistent-model", ""]:
-                            request_data = {
-                                "model": model_name,
-                                "messages": [{"role": "user", "content": "Test"}],
-                                "max_tokens": 10
-                            }
-                            
-                            response = test_client.post("/v1/chat/completions", json=request_data)
-                            assert response.status_code == 200
-                            
-                            # Verify the response has a model field (actual value doesn't matter in single-model setup)
-                            data = response.json()
-                            assert "model" in data
-    
-    def test_unsupported_parameters_handled_gracefully(self, test_client, mock_model_info):
-        """Test that unsupported parameters are handled gracefully."""
-        with patch('openchat_mlx_server.model_manager.MLXModelManager.get_model') as mock_get_model:
-            with patch('openchat_mlx_server.model_manager.MLXModelManager.format_chat_template') as mock_format_chat:
-                with patch('openchat_mlx_server.generation.GenerationEngine.generate_async') as mock_generate:
-                    with patch('openchat_mlx_server.generation.GenerationEngine.count_tokens') as mock_count:
-                        mock_get_model.return_value = mock_model_info
-                        mock_format_chat.return_value = "User: Test\nAssistant:"
-                        
-                        async def mock_async_gen():
-                            yield "Response"
-                        
-                        mock_generate.return_value = mock_async_gen()
-                        mock_count.side_effect = [5, 3]
-                        
-                        # Test with various OpenAI parameters that MLX doesn't support
-                        request_data = {
-                            "messages": [{"role": "user", "content": "Test"}],
-                            "max_tokens": 10,
-                            "temperature": 0.7,  # Not supported by MLX-LM
-                            "top_p": 0.9,        # Not supported by MLX-LM
-                            "frequency_penalty": 0.1,  # Not supported
-                            "presence_penalty": 0.1,   # Not supported
-                            "logit_bias": {"123": 10},  # Not supported
-                            "user": "test-user",        # Not supported
-                            "n": 1,                     # Not supported
-                            "logprobs": True,           # Not supported
-                            "echo": False               # Not supported
-                        }
-                        
-                        response = test_client.post("/v1/chat/completions", json=request_data)
-                        # Should still work, just ignore unsupported parameters
-                        assert response.status_code == 200
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

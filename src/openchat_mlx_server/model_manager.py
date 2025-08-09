@@ -1,4 +1,6 @@
-"""Single model manager for MLX Engine Server."""
+"""
+Unified model manager for MLX Engine Server with thinking support.
+"""
 
 import json
 import time
@@ -17,6 +19,7 @@ from .utils import (
     format_bytes,
     SystemMonitor
 )
+from .thinking import detect_thinking_support
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +37,17 @@ class ModelInfo:
     chat_template: Optional[str]
     loaded_at: datetime
     memory_usage: Optional[int] = None  # in bytes
+    supports_thinking: bool = False  # Whether model supports thinking/reasoning
+    thinking_capability: Optional[str] = None  # Capability level (none/basic/native/advanced)
 
 
 class MLXModelManager:
     """
-    Manages a single MLX model loaded at startup.
+    Manages MLX model loading and configuration with thinking support.
     
     Features:
-    - Auto-detection of model type
+    - Auto-detection of model type and capabilities
+    - Thinking/reasoning support detection
     - Proper tokenizer configuration
     - Memory usage tracking
     """
@@ -50,64 +56,50 @@ class MLXModelManager:
         """Initialize the model manager."""
         self.model_info: Optional[ModelInfo] = None
         self.system_monitor = SystemMonitor()
-        
-        logger.info("Model manager initialized")
+        logger.info("MLXModelManager initialized")
     
     def load_model(
         self,
         model_path: str,
-        config: Optional[Dict[str, Any]] = None,
-        adapter_path: Optional[str] = None
+        tokenizer_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, str]:
         """
-        Load the model at startup.
+        Load an MLX model with thinking support detection.
         
         Args:
             model_path: Path to the model directory
-            config: Optional configuration overrides
-            adapter_path: Optional path to LoRA adapter
+            tokenizer_config: Optional tokenizer configuration
         
         Returns:
             Tuple of (success, message)
         """
-        if self.model_info is not None:
-            return False, "Model already loaded"
-        
-        model_path = Path(model_path)
-        
-        # Check if path exists
-        if not model_path.exists():
-            return False, f"Model path does not exist: {model_path}"
-        
-        # Check if it's a directory
-        if not model_path.is_dir():
-            return False, f"Model path must be a directory: {model_path}"
-        
-        # Validate model path structure
-        if not validate_model_path(model_path):
-            return False, f"Invalid model path: {model_path}"
-        
         try:
-            logger.info(f"Loading model from {model_path}")
-            start_time = time.time()
+            logger.info(f"Loading model from: {model_path}")
             
-            # Auto-detect model type and get configuration
-            model_metadata = detect_model_type(model_path)
+            # Validate and prepare path
+            model_path = Path(model_path).resolve()
+            if not validate_model_path(model_path):
+                return False, f"Invalid model path: {model_path}"
             
-            # Merge configurations (priority: explicit > auto-detected > defaults)
-            tokenizer_config = model_metadata.get("tokenizer_config", {})
-            if config and "tokenizer_config" in config:
-                tokenizer_config.update(config["tokenizer_config"])
+            # Detect model metadata
+            model_metadata = self._detect_model_metadata(model_path)
+            logger.info(f"Detected model type: {model_metadata['type']}")
             
             # Load the model and tokenizer
-            model, tokenizer = self._load_mlx_model(
-                model_path,
-                tokenizer_config,
-                adapter_path
-            )
+            start_time = time.time()
+            model, tokenizer = load(str(model_path))
+            load_time = time.time() - start_time
+            logger.info(f"Model loaded in {load_time:.2f} seconds")
+            
+            # Apply tokenizer configuration if provided
+            if tokenizer_config:
+                self._apply_tokenizer_config(tokenizer, tokenizer_config)
             
             # Get memory usage
             memory_usage = self._estimate_model_memory(model)
+            
+            # Detect thinking support
+            supports_thinking, thinking_capability = detect_thinking_support(tokenizer)
             
             # Create model info
             self.model_info = ModelInfo(
@@ -116,94 +108,128 @@ class MLXModelManager:
                 tokenizer=tokenizer,
                 model_type=model_metadata["type"],
                 architecture=model_metadata.get("architecture"),
-                tokenizer_config=tokenizer_config,
+                tokenizer_config=tokenizer_config or {},
                 chat_template=model_metadata.get("chat_template"),
                 loaded_at=datetime.now(),
-                memory_usage=memory_usage
+                memory_usage=memory_usage,
+                supports_thinking=supports_thinking,
+                thinking_capability=thinking_capability
             )
             
-            load_time = time.time() - start_time
-            logger.info(
-                f"Model loaded successfully in {load_time:.2f}s "
-                f"(type: {model_metadata['type']}, memory: {format_bytes(memory_usage or 0)})"
-            )
+            # Log model information
+            logger.info(f"Model loaded successfully:")
+            logger.info(f"  - Type: {self.model_info.model_type}")
+            logger.info(f"  - Architecture: {self.model_info.architecture}")
+            logger.info(f"  - Memory usage: {format_bytes(memory_usage or 0)}")
+            logger.info(f"  - Supports thinking: {supports_thinking}")
+            logger.info(f"  - Thinking capability: {thinking_capability}")
             
-            return True, f"Model from {model_path.name} loaded successfully"
-        
+            return True, f"Model loaded successfully from {model_path}"
+            
         except Exception as e:
             logger.error(f"Failed to load model: {e}", exc_info=True)
             return False, f"Failed to load model: {str(e)}"
     
-    def _load_mlx_model(
-        self,
-        model_path: Path,
-        tokenizer_config: Dict[str, Any],
-        adapter_path: Optional[str] = None
-    ) -> Tuple[Any, Any]:
+    def _detect_model_metadata(self, model_path: Path) -> Dict[str, Any]:
         """
-        Load MLX model and tokenizer with proper configuration.
+        Detect model metadata from configuration files.
         
         Args:
-            model_path: Path to the model
-            tokenizer_config: Tokenizer configuration
-            adapter_path: Optional adapter path
+            model_path: Path to model directory
         
         Returns:
-            Tuple of (model, tokenizer)
+            Dictionary with model metadata
         """
-        # Load model using mlx_lm
-        model, tokenizer = load(
-            str(model_path),
-            adapter_path=adapter_path,
-            tokenizer_config=tokenizer_config
-        )
+        metadata = {
+            "type": "unknown",
+            "architecture": None,
+            "chat_template": None
+        }
         
-        # Ensure tokenizer has necessary attributes
-        if not hasattr(tokenizer, "eos_token_id") and "eos_token" in tokenizer_config:
-            tokenizer.eos_token = tokenizer_config["eos_token"]
-            if hasattr(tokenizer, "convert_tokens_to_ids"):
-                tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
+        # Check for config.json
+        config_path = model_path / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    architectures = config.get("architectures", [])
+                    metadata["architecture"] = architectures[0] if architectures else None
+                    metadata["type"] = detect_model_type(model_path)
+            except Exception as e:
+                logger.warning(f"Failed to read config.json: {e}")
         
-        return model, tokenizer
+        # Check for tokenizer_config.json
+        tokenizer_config_path = model_path / "tokenizer_config.json"
+        if tokenizer_config_path.exists():
+            try:
+                with open(tokenizer_config_path, 'r') as f:
+                    tokenizer_config = json.load(f)
+                    metadata["chat_template"] = tokenizer_config.get("chat_template")
+            except Exception as e:
+                logger.warning(f"Failed to read tokenizer_config.json: {e}")
+        
+        return metadata
+    
+    def _apply_tokenizer_config(
+        self,
+        tokenizer: Any,
+        config: Dict[str, Any]
+    ):
+        """
+        Apply configuration to tokenizer.
+        
+        Args:
+            tokenizer: Tokenizer object
+            config: Configuration dictionary
+        """
+        for key, value in config.items():
+            if hasattr(tokenizer, key):
+                try:
+                    setattr(tokenizer, key, value)
+                    logger.debug(f"Set tokenizer.{key} = {value}")
+                except Exception as e:
+                    logger.warning(f"Failed to set tokenizer.{key}: {e}")
     
     def get_model(self) -> Optional[ModelInfo]:
-        """
-        Get the loaded model.
-        
-        Returns:
-            ModelInfo or None if not loaded
-        """
+        """Get the loaded model info."""
         return self.model_info
     
-    def get_model_info(self) -> Optional[Dict[str, Any]]:
+
+    
+    def get_model_status(self) -> Dict[str, Any]:
         """
-        Get information about the loaded model.
+        Get current model status.
         
         Returns:
-            Model information dictionary or None
+            Dictionary with model status information
         """
         if not self.model_info:
-            return None
+            return {"loaded": False}
         
         return {
+            "loaded": True,
             "path": str(self.model_info.model_path),
             "type": self.model_info.model_type,
             "architecture": self.model_info.architecture,
             "loaded_at": self.model_info.loaded_at.isoformat(),
-            "memory_usage": format_bytes(self.model_info.memory_usage or 0)
+            "memory_usage": format_bytes(self.model_info.memory_usage or 0),
+            "supports_thinking": self.model_info.supports_thinking,
+            "thinking_capability": self.model_info.thinking_capability
         }
     
     def format_chat_template(
         self,
         messages: list[Dict[str, str]],
-        add_generation_prompt: bool = True
+        add_generation_prompt: bool = True,
+        enable_thinking: Optional[bool] = None
     ) -> str:
         """
-        Apply chat template formatting for better response quality.
+        Apply chat template formatting with thinking support.
         
         Args:
             messages: List of message dictionaries
             add_generation_prompt: Whether to add generation prompt
+            enable_thinking: Whether to enable thinking mode (None = auto)
         
         Returns:
             Formatted prompt string
@@ -211,9 +237,8 @@ class MLXModelManager:
         if not self.model_info:
             raise ValueError("No model loaded")
         
+        # Use tokenizer's apply_chat_template directly
         tokenizer = self.model_info.tokenizer
-        
-        # Try to use tokenizer's chat template if available
         if hasattr(tokenizer, "apply_chat_template"):
             try:
                 prompt = tokenizer.apply_chat_template(
@@ -225,7 +250,7 @@ class MLXModelManager:
             except Exception as e:
                 logger.warning(f"Failed to apply chat template: {e}")
         
-        # Fallback to manual formatting
+        # Manual formatting fallback
         formatted_messages = []
         for message in messages:
             role = message.get("role", "user")
@@ -248,60 +273,60 @@ class MLXModelManager:
     
     def _estimate_model_memory(self, model: Any) -> int:
         """
-        Estimate memory usage of a model.
+        Estimate model memory usage.
         
         Args:
             model: MLX model object
         
         Returns:
-            Estimated memory in bytes
+            Estimated memory usage in bytes
         """
         try:
-            # This is a rough estimation
-            # MLX doesn't provide direct memory usage info
-            total_params = 0
-            
-            if hasattr(model, "parameters"):
-                for param in model.parameters():
-                    if hasattr(param, "size"):
-                        total_params += param.size
-            
-            # Assume 2 bytes per parameter (fp16)
-            return total_params * 2
+            # Get memory info from MLX
+            memory_info = mx.metal.get_memory_info()
+            return memory_info.get("used_bytes", 0)
         except Exception as e:
-            logger.warning(f"Could not estimate model memory: {e}")
-            return 0
+            logger.warning(f"Failed to get memory info: {e}")
+            
+            # Fallback: rough estimate based on parameter count
+            try:
+                param_count = sum(p.size for p in model.parameters().values())
+                # Assume 2 bytes per parameter (16-bit precision)
+                return param_count * 2
+            except:
+                return 0
     
-    def get_status(self) -> Dict[str, Any]:
+    def unload_model(self) -> Tuple[bool, str]:
         """
-        Get comprehensive status of the model manager.
+        Unload the current model.
         
         Returns:
-            Status dictionary
+            Tuple of (success, message)
         """
-        system_info = self.system_monitor.get_system_info()
+        if not self.model_info:
+            return False, "No model loaded"
         
-        return {
-            "model_loaded": self.model_info is not None,
-            "model_info": self.get_model_info(),
-            "system": system_info
-        }
+        try:
+            # Clear model and tokenizer
+            self.model_info = None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear MLX cache
+            mx.clear_cache()
+            
+            logger.info("Model unloaded successfully")
+            return True, "Model unloaded successfully"
+            
+        except Exception as e:
+            logger.error(f"Failed to unload model: {e}", exc_info=True)
+            return False, f"Failed to unload model: {str(e)}"
     
     def cleanup(self) -> None:
-        """Clean up the loaded model."""
-        if self.model_info:
-            logger.info("Cleaning up loaded model")
-            
-            try:
-                # Clean up model
-                del self.model_info.model
-                del self.model_info.tokenizer
-                self.model_info = None
-                
-                # Force garbage collection
-                import gc
-                gc.collect()
-                
-                logger.info("Model cleanup complete")
-            except Exception as e:
-                logger.error(f"Error during cleanup: {e}")
+        """
+        Cleanup model resources.
+        Alias for unload_model for test compatibility.
+        """
+        self.unload_model()

@@ -78,16 +78,19 @@ class TestModelEndpoints:
         assert data["object"] == "list"
         assert data["data"] == []
     
-    @patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_info')
-    def test_list_models_with_loaded_model(self, mock_get_model_info, test_client, mock_model_info):
+    @patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_status')
+    def test_list_models_with_loaded_model(self, mock_get_status, test_client, mock_model_info):
         """Test listing models when one is loaded."""
-        # get_model_info returns a dictionary, not the ModelInfo object
-        mock_get_model_info.return_value = {
+        # Mock the model status that the API endpoint uses
+        mock_get_status.return_value = {
+            "loaded": True,
             "path": "test-model-path",
             "type": "test",
             "architecture": "TestModel",
             "loaded_at": "2023-01-01T00:00:00",
-            "memory_usage": "1.0 GB"
+            "memory_usage": "1.0 GB",
+            "supports_thinking": True,
+            "thinking_capability": "basic"
         }
         
         response = test_client.get("/v1/models")
@@ -108,48 +111,24 @@ class TestModelEndpoints:
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data  # FastAPI returns "detail" for 404
-    
-    @pytest.mark.skip(reason="GET /v1/models/{model_id} endpoint not implemented")
-    @patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_info')
-    def test_get_model_found(self, mock_get_model_info, test_client, mock_model_info):
-        """Test getting existing model."""
-        mock_get_model_info.return_value = {
-            "path": "test-model-path",
-            "type": "test",
-            "architecture": "TestModel",
-            "loaded_at": "2023-01-01T00:00:00",
-            "memory_usage": "1.0 GB"
-        }
-        
-        response = test_client.get("/v1/models/test-model-path")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["id"] == "test-model-path"
-        assert data["object"] == "model"
 
 
 class TestMLXStatusEndpoint:
     """Test MLX status endpoint."""
     
-    @patch('openchat_mlx_server.model_manager.MLXModelManager.get_status')
+    @patch('openchat_mlx_server.model_manager.MLXModelManager.get_model_status')
     def test_mlx_status(self, mock_get_status, test_client):
         """Test MLX status endpoint."""
-        # Mock model status with complete system info
+        # Mock model status - this is what get_model_status() returns
         mock_get_status.return_value = {
-            "model_loaded": True,
-            "model_info": {
-                "path": "test-model",
-                "type": "test",
-                "architecture": "TestModel",
-                "loaded_at": "2023-01-01T00:00:00",
-                "memory_usage": "1.0 GB"
-            },
-            "system": {
-                "memory": {"system": {"total_gb": 32.0, "available_gb": 16.0, "used_gb": 16.0, "percent": 50.0}},
-                "cpu": {"percent": 25.0, "count": 8},
-                "gpu": {"device": "gpu", "mlx_version": "0.27.1"},
-                "uptime": "0:01:00"
-            }
+            "loaded": True,
+            "path": "test-model",
+            "type": "test",
+            "architecture": "TestModel",
+            "loaded_at": "2023-01-01T00:00:00",
+            "memory_usage": "1.0 GB",
+            "supports_thinking": True,
+            "thinking_capability": "basic"
         }
         
         response = test_client.get("/v1/mlx/status")

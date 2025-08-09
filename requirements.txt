@@ -1,6 +1,6 @@
 # Core MLX and ML libraries
 mlx>=0.27.1
-mlx-lm>=0.26.2
+mlx-lm>=0.26.3
 transformers>=4.55.0
 
 # Web server framework
@@ -11,9 +11,7 @@ pydantic>=2.11.7
 # Additional utilities
 requests>=2.32.4
 psutil>=7.0.0
-python-multipart>=0.0.20
-httpx>=0.28.1
-aiofiles>=24.1.0
+
 
 # Optional: for development
 # pytest>=7.4.0
