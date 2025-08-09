@@ -1,6 +1,6 @@
 # Core MLX and ML libraries
 mlx>=0.27.1
-mlx-lm>=0.26.2
+mlx-lm>=0.26.3
 transformers>=4.55.0
 
 # Web server framework

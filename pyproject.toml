@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "mlx>=0.27.1",
-    "mlx-lm>=0.26.2",
+    "mlx-lm>=0.26.3",
     "transformers>=4.55.0",
     "fastapi>=0.116.1",
     "uvicorn[standard]>=0.35.0",
