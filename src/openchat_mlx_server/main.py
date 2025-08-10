@@ -8,6 +8,32 @@ Use it exactly like `python -m mlx_lm server ...` or `mlx_lm.server ...`.
 from __future__ import annotations
 
 import sys
+import os
+import shutil
+import platform
+
+# Mitigate PyInstaller + multiprocessing issue where child processes are spawned
+# using this binary as the interpreter and pass CPython flags (-OO -B -S -I -c ...).
+# We redirect multiprocessing to a real Python interpreter and prefer 'fork' on macOS.
+try:
+    import multiprocessing as _mp  # noqa: WPS433
+
+    real_python = shutil.which("python3") or sys.executable
+    if real_python:
+        try:
+            _mp.set_executable(real_python)
+        except Exception:
+            pass
+
+    if platform.system() == "Darwin":
+        try:
+            _mp.set_start_method("fork", force=False)
+        except RuntimeError:
+            # Already set in this process; ignore
+            pass
+except Exception:
+    # If multiprocessing is unavailable or configuration fails, proceed anyway
+    pass
 
 
 def main() -> int:
