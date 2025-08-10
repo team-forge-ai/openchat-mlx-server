@@ -1,9 +1,6 @@
-"""MLX Engine Server - OpenAI-compatible inference server for Apple Silicon."""
+"""Thin wrapper around upstream mlx_lm.server."""
 
-__version__ = "0.2.0"
-__author__ = "MLX Engine Server Contributors"
+__version__ = "0.3.0"
+__author__ = "OpenChat MLX Server"
 
-from .config import ServerConfig
-from .model_manager import MLXModelManager
-
-__all__ = ["ServerConfig", "MLXModelManager", "__version__"]
+__all__ = ["__version__"]
