@@ -78,3 +78,5 @@ temp/
 *.tmp
 
 models/*
+
+node_modules/
