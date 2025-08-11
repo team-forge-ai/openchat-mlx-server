@@ -85,41 +85,33 @@ def test_streaming(client: OpenAI, model: str = "default"):
         return False
 
 
-def test_thinking_if_supported(client: OpenAI, model: str = "default"):
+def test_tool_calling_and_logprobs(client: OpenAI, model: str = "default"):
     """
-    Test thinking/reasoning functionality if supported by the model.
+    Demonstrate tool calling markers and logprobs support from mlx_lm.server.
     """
-    print("\n🔍 Testing Thinking/Reasoning (if supported)...")
+    print("\n🔍 Testing Tool Calling and Logprobs...")
     print("-" * 40)
-    
+
     try:
-        # Try a request that might trigger thinking
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "user", "content": "What is 15 * 23? Please show your work step by step."}
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Return a JSON object with name='add' and arguments {\"a\":2,\"b\":3}"}
             ],
-            max_tokens=300,
-            temperature=0.7,
-            extra_body={
-                "include_reasoning": True,
-                "enable_thinking": True
-            }
+            max_tokens=64,
+            temperature=0.2,
+            logprobs=5
         )
-        
-        print(f"✅ Response received:")
+
+        print("✅ Response received")
         print(f"   Content: {response.choices[0].message.content}")
-        
-        # Check if reasoning was included (this would be in a custom field)
-        if hasattr(response.choices[0], 'reasoning') or 'reasoning' in response.choices[0].model_dump():
-            print(f"   🧠 Reasoning detected!")
-        else:
-            print(f"   ℹ️ No reasoning in response (model may not support it)")
-        
+        if getattr(response.choices[0], 'logprobs', None):
+            print("   ℹ️ logprobs present")
         return True
-        
+
     except Exception as e:
-        print(f"❌ Thinking test failed: {e}")
+        print(f"❌ Tool/logprobs test failed: {e}")
         return False
 
 
@@ -173,7 +165,7 @@ def main():
     )
     parser.add_argument(
         "--base-url",
-        default="http://localhost:8000/v1",
+        default="http://localhost:8080/v1",
         help="Base URL for the MLX Engine Server OpenAI API"
     )
     parser.add_argument(
@@ -222,8 +214,8 @@ def main():
     if test_streaming(client, model_id):
         success_count += 1
     
-    # Test 3: Thinking (if supported)
-    if test_thinking_if_supported(client, model_id):
+    # Test 3: Tool calling and logprobs
+    if test_tool_calling_and_logprobs(client, model_id):
         success_count += 1
     
     # Summary

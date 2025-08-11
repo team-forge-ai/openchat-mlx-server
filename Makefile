@@ -8,7 +8,8 @@ PYTHON := $(VENV_DIR)/bin/python
 PIP := $(PYTHON) -m pip
 PORT ?= 8000
 HOST ?= 127.0.0.1
-MODEL ?= ./models/Qwen3-32B-MLX-4bit
+# Leave MODEL empty by default to allow starting without preloading a model
+MODEL ?=
 MAX_TOKENS ?= 2000
 
 # Helper to check if venv exists
@@ -42,10 +43,11 @@ install: venv ## Install production dependencies
 dev-install: venv ## Install development dependencies
 	$(PIP) install -e ".[dev]"
 
-run: ## Run the server (defaults to Qwen3-0.6B-MLX-4bit model)
+run: ## Run the upstream mlx_lm.server via our thin wrapper
 	$(check_venv)
-	@echo "Starting MLX Engine Server on http://$(HOST):$(PORT) with model: $(MODEL)"
-	$(PYTHON) -m openchat_mlx_server.main $(MODEL) --host $(HOST) --port $(PORT) --log-level DEBUG --max-tokens $(MAX_TOKENS)
+	@echo "Starting mlx_lm.server on http://$(HOST):$(PORT) $(if $(MODEL),with model: $(MODEL),without preloaded model)"
+	@MODEL_FLAG=""; if [ -n "$(MODEL)" ]; then MODEL_FLAG="--model $(MODEL)"; fi; \
+	$(PYTHON) -m openchat_mlx_server.main $$MODEL_FLAG --host $(HOST) --port $(PORT) --max-tokens $(MAX_TOKENS)
 
 stop: ## Stop the server
 	$(check_venv)
@@ -106,12 +108,5 @@ status: ## Check server status
 	$(check_venv)
 	@curl -s http://$(HOST):$(PORT)/health 2>/dev/null | $(PYTHON) -m json.tool || echo "Server not running"
 
-load-model: ## Load a model (requires MODEL variable)
-	$(check_venv)
-	@if [ -z "$(MODEL)" ]; then \
-		echo "Error: MODEL variable not set. Usage: make load-model MODEL=/path/to/model"; \
-		exit 1; \
-	fi
-	@curl -X POST http://$(HOST):$(PORT)/v1/mlx/models/load \
-		-H "Content-Type: application/json" \
-		-d '{"model_path": "$(MODEL)"}' | $(PYTHON) -m json.tool
+load-model: ## Deprecated (mlx_lm.server loads per-request or at startup)
+	@echo "Deprecated: use --model at startup or pass 'model' in the request body."
