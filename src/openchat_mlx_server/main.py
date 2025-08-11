@@ -45,7 +45,21 @@ def main() -> int:
         return 1
 
     # mlx_lm.server.main() parses sys.argv itself and runs the HTTP server
-    mlx_main()
+    try:
+        mlx_main()
+    except KeyboardInterrupt:
+        # Graceful shutdown on SIGINT without noisy traceback (important for PyInstaller)
+        return 0
+    except SystemExit as system_exit:
+        # Respect explicit exit codes from upstream CLI
+        try:
+            return int(system_exit.code) if system_exit.code is not None else 0
+        except Exception:
+            return 0
+    except Exception as unexpected_error:
+        # Surface unexpected errors with a concise message and non-zero exit
+        print(f"Unhandled exception: {unexpected_error}", file=sys.stderr)
+        return 1
     return 0
 
 
