@@ -38,6 +38,56 @@ def get_system_fingerprint():
     return f"{__version__}-{mx.__version__}-{platform.platform()}-{gpu_arch}"
 
 
+def _ensure_tool_call_indices(chunk: dict) -> None:
+    """
+    Best-effort normalization for OpenAI-compatible streaming:
+    - Injects missing numeric `index` into each `choices[].delta.tool_calls[]` entry.
+    - Ensures each tool call has a string `id`; generates one if missing.
+    - Coerces `choices[].message.tool_call_id` to string for tool role messages.
+    - Also applies to non-stream `choices[].message.tool_calls[]`.
+    - Does nothing if shape differs; never raises.
+    """
+    try:
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                tool_calls = delta.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for i, tc in enumerate(tool_calls):
+                        if not isinstance(tc, dict):
+                            continue
+                        if not isinstance(tc.get("index"), int):
+                            tc["index"] = i
+                        tool_id = tc.get("id")
+                        if tool_id is None:
+                            tc["id"] = f"call_{uuid.uuid4().hex}"
+                        elif not isinstance(tool_id, str):
+                            tc["id"] = str(tool_id)
+            message = choice.get("message")
+            if isinstance(message, dict):
+                tool_calls_msg = message.get("tool_calls")
+                if isinstance(tool_calls_msg, list):
+                    for i, tc in enumerate(tool_calls_msg):
+                        if not isinstance(tc, dict):
+                            continue
+                        if not isinstance(tc.get("index"), int):
+                            tc["index"] = i
+                        tool_id = tc.get("id")
+                        if tool_id is None:
+                            tc["id"] = f"call_{uuid.uuid4().hex}"
+                        elif not isinstance(tool_id, str):
+                            tc["id"] = str(tool_id)
+
+                # If this is a tool role message, ensure tool_call_id is a string
+                if message.get("role") == "tool":
+                    tool_call_id = message.get("tool_call_id")
+                    if tool_call_id is not None and not isinstance(tool_call_id, str):
+                        message["tool_call_id"] = str(tool_call_id)
+    except Exception:
+        # Never break streaming on normalization issues
+        pass
+
+
 class StopCondition(NamedTuple):
     stop_met: bool
     trim_length: int
@@ -748,6 +798,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     response = self.generate_response(
                         segment, None, tool_calls=tool_calls
                     )
+                    _ensure_tool_call_indices(response)
                     self.wfile.write(f"data: {json.dumps(response)}\n\n".encode())
                     self.wfile.flush()
                     segment = ""
@@ -766,6 +817,7 @@ class APIHandler(BaseHTTPRequestHandler):
             response = self.generate_response(
                 segment, finish_reason, tool_calls=tool_calls
             )
+            _ensure_tool_call_indices(response)
             self.wfile.write(f"data: {json.dumps(response)}\n\n".encode())
             self.wfile.flush()
             if self.stream_options is not None and self.stream_options["include_usage"]:
@@ -790,6 +842,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 tokens=tokens,
                 tool_calls=tool_calls,
             )
+            _ensure_tool_call_indices(response)
             response_json = json.dumps(response).encode()
             indent = "\t"  # Backslashes can't be inside of f-strings
             logging.debug(f"Outgoing Response: {json.dumps(response, indent=indent)}")

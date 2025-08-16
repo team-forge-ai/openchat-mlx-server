@@ -89,19 +89,29 @@ binaries = []
 for metallib in mlx_metallib_files:
     binaries.append((metallib, 'mlx/lib'))
 
-    a = Analysis(
+hiddenimports = (
+    [
+        'openchat_mlx_server',
+        'openchat_mlx_server.main',
+    ]
+    + collect_submodules('mlx')
+    + collect_submodules('mlx_lm')
+    + collect_submodules('mlx_lm.models')
+    + [
+        'transformers',
+        'transformers.models',
+        'sentencepiece',
+        'tiktoken',
+        'huggingface_hub',
+    ]
+)
+
+a = Analysis(
     ['src/openchat_mlx_server/__main__.py'],
     pathex=['src'],
     binaries=binaries,
     datas=[],
-    hiddenimports=[
-        'openchat_mlx_server',
-        'openchat_mlx_server.main',
-        'mlx', 'mlx.core', 'mlx.nn', 'mlx.optimizers', 'mlx.utils', 'mlx._reprlib_fix', 'mlx._os_warning', 'mlx.__main__',
-        'mlx_lm', 'mlx_lm.server', 'mlx_lm.sample_utils', 'mlx_lm.tokenizer_utils', 'mlx_lm.utils',
-        'mlx_lm.models', 'mlx_lm.models.qwen3', 'mlx_lm.models.qwen', 'mlx_lm.models.qwen2', 'mlx_lm.models.llama', 'mlx_lm.models.gemma', 'mlx_lm.models.gemma2', 'mlx_lm.models.phi', 'mlx_lm.models.phi3', 'mlx_lm.models.mistral',
-        'transformers', 'transformers.models', 'sentencepiece', 'tiktoken', 'huggingface_hub'
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['runtime_numpy_safe_hook.py'],

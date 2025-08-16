@@ -9,7 +9,7 @@ PIP := $(PYTHON) -m pip
 PORT ?= 8000
 HOST ?= 127.0.0.1
 # Leave MODEL empty by default to allow starting without preloading a model
-MODEL ?=
+MODEL ?= lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit
 MAX_TOKENS ?= 2000
 
 # Helper to check if venv exists
