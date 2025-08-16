@@ -2,6 +2,5 @@ mlx>=0.27.1
 mlx-lm>=0.26.3
 transformers>=4.55.0
 huggingface_hub>=0.23.0
-requests>=2.32.4
 # Optional: building binary
 # pyinstaller>=6.15.0

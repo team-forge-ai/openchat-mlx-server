@@ -27,14 +27,6 @@ dependencies = [
     "mlx-lm>=0.26.3",
     "huggingface_hub>=0.24.0",
     "transformers>=4.55.0",
-    "fastapi>=0.116.1",
-    "uvicorn[standard]>=0.35.0",
-    "pydantic>=2.11.7",
-    "requests>=2.32.4",
-    "psutil>=7.0.0",
-    "python-multipart>=0.0.20",
-    "httpx>=0.28.1",
-    "aiofiles>=24.1.0",
 ]
 
 [project.optional-dependencies]
