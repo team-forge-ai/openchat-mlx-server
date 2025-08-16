@@ -148,7 +148,7 @@ def process_message_content(messages):
 @dataclass
 class PromptCache:
     cache: List[Any] = field(default_factory=list)
-    model_key: Tuple[str, Optional[str]] = ("", None, None)
+    model_key: Tuple[str, Optional[str], Optional[str]] = ("", None, None)
     tokens: List[int] = field(default_factory=list)
 
 
@@ -1056,9 +1056,15 @@ def main():
         "--chat-template-args",
         type=json.loads,
         help="""A JSON formatted string of arguments for the tokenizer's apply_chat_template, e.g. '{"enable_thinking":false}'""",
-        default="{}",
+        default={},
     )
     args = parser.parse_args()
+    # Ensure chat_template_args is a dict even when default applies
+    if isinstance(args.chat_template_args, str):
+        try:
+            args.chat_template_args = json.loads(args.chat_template_args)
+        except Exception:
+            args.chat_template_args = {}
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), None),
