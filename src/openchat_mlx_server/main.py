@@ -37,11 +37,11 @@ except Exception:
 
 
 def main() -> int:
-    """Delegate to upstream mlx_lm.server CLI."""
+    """Delegate to local server CLI (forked from mlx_lm.server)."""
     try:
-        from mlx_lm.server import main as mlx_main
+        from openchat_mlx_server.mlx_lm.server import main as mlx_main
     except Exception as exc:  # pragma: no cover
-        print(f"Failed to import mlx_lm.server: {exc}")
+        print(f"Failed to import local server: {exc}")
         return 1
 
     # mlx_lm.server.main() parses sys.argv itself and runs the HTTP server
