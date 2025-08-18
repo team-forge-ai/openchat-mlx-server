@@ -36,8 +36,26 @@ except Exception:
     pass
 
 
+def _set_own_process_group_if_possible() -> None:
+    """Ensure this process is leader of its own process group on POSIX.
+
+    This allows callers to send signals to the entire server tree using
+    negative PIDs (e.g., kill(-pgid, SIGTERM)) for reliable shutdowns
+    when using multiprocessing with 'fork'.
+    """
+    try:
+        if os.name == "posix":  # Only available/meaningful on POSIX systems
+            os.setpgrp()
+    except Exception:
+        # Best-effort only; ignore if unsupported or if permissions disallow
+        pass
+
+
 def main() -> int:
     """Delegate to local server CLI (forked from mlx_lm.server)."""
+    # Place the server in its own process group so group-targeted signals
+    # reach all descendants (important for reliable shutdown).
+    _set_own_process_group_if_possible()
     try:
         from openchat_mlx_server.mlx_lm.server import main as mlx_main
     except Exception as exc:  # pragma: no cover
