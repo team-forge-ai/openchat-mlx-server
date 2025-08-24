@@ -180,6 +180,22 @@ exe = EXE(
         
         # Make binary executable
         binary_path.chmod(0o755)
+
+        # Optionally bundle a Python interpreter for multiprocessing helpers
+        # This avoids the packaged binary being invoked with CPython flags
+        # (e.g. -OO -B -S -I -c ...) by multiprocessing.
+        #
+        # Set SKIP_BUNDLE_PYTHON=1 to disable. You can also override the
+        # interpreter path with BUNDLE_PYTHON_PATH.
+        if os.environ.get("SKIP_BUNDLE_PYTHON", "0") != "1":
+            try:
+                py_src = os.environ.get("BUNDLE_PYTHON_PATH") or sys.executable
+                dest_path = binary_path.parent / "python3"
+                shutil.copy2(py_src, dest_path)
+                dest_path.chmod(0o755)
+                print(f"Bundled Python interpreter: {dest_path} -> {py_src}")
+            except Exception as bundle_err:
+                print(f"Warning: Failed to bundle Python interpreter: {bundle_err}")
         
         return True
         
@@ -204,12 +220,13 @@ def create_distribution():
     
     dist_dir.mkdir()
     
-    # Copy binary
-    binary_src = Path("dist/openchat-mlx-server")
-    if binary_src.exists():
-        shutil.copy2(binary_src, dist_dir / "openchat-mlx-server")
+    # Copy onedir contents into distribution root so the binary lives at
+    # openchat-mlx-server-dist/openchat-mlx-server alongside its dependencies
+    onedir_src = Path("dist/openchat-mlx-server")
+    if onedir_src.exists() and onedir_src.is_dir():
+        shutil.copytree(onedir_src, dist_dir, dirs_exist_ok=True)
     else:
-        print("Binary not found")
+        print("Onedir build directory not found")
         return False
     
     # Create README for distribution
@@ -236,6 +253,11 @@ def create_distribution():
 # Get help
 ./openchat-mlx-server --help
 ```
+
+If you are embedding this as a sidecar, a `python3` executable may be
+included alongside the server. The server will prefer this interpreter for
+multiprocessing helper processes to avoid passing CPython flags to the
+server binary.
 
 ## API Documentation
 
@@ -310,9 +332,9 @@ def main():
     
     print("\n🎉 Build complete!")
     print("\nTo run the server:")
-    print("  ./dist/openchat-mlx-server")
+    print("  ./dist/openchat-mlx-server/openchat-mlx-server")
     print("\nTo see all options:")
-    print("  ./dist/openchat-mlx-server --help")
+    print("  ./dist/openchat-mlx-server/openchat-mlx-server --help")
 
 
 if __name__ == "__main__":
