@@ -961,11 +961,17 @@ class APIHandler(BaseHTTPRequestHandler):
             file_names = {f.file_path.name for f in repo.refs["main"].files}
             return all(f in file_names for f in files)
 
-        # Scan the cache directory for downloaded mlx models
-        hf_cache_info = scan_cache_dir()
-        downloaded_models = [
-            repo for repo in hf_cache_info.repos if probably_mlx_lm(repo)
-        ]
+        downloaded_models = []
+        try:
+            # Scan the cache directory for downloaded mlx models
+            hf_cache_info = scan_cache_dir()
+            downloaded_models = [
+                repo for repo in hf_cache_info.repos if probably_mlx_lm(repo)
+            ]
+        except Exception as e:
+            # If cache directory doesn't exist or can't be scanned, log warning and continue with empty list
+            logging.warning(f"Could not scan HuggingFace cache directory: {e}")
+            downloaded_models = []
 
         # Create a list of available models
         models = [
